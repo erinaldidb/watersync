@@ -39,6 +39,50 @@ class EpicCsaIngestionWorker(JdbcIngestionWorker):
             return int(row["max_csa_wm"])
         return None
 
+    def _get_csa_partition_bounds(
+        self,
+        join_condition: str,
+        wm_filter: str,
+    ) -> tuple[int | None, int | None]:
+        """MIN/MAX of partition_column over the CSA join + watermark window."""
+        if not self.config.partition_column:
+            return None, None
+        bounds_query = (
+            f"(SELECT MIN(main.{self.config.partition_column}) AS min_val, "
+            f"MAX(main.{self.config.partition_column}) AS max_val "
+            f"FROM {self.derive_csa_table_name()} csa "
+            f"LEFT JOIN {self.config.source_table_name} main ON {join_condition} "
+            f"WHERE {wm_filter}) AS bounds"
+        )
+        row = self.build_jdbc_reader(bounds_query).load().first()
+        if row is None or row["min_val"] is None or row["max_val"] is None:
+            return None, None
+        return int(row["min_val"]), int(row["max_val"])
+
+    def _get_csa_predicate_boundaries(
+        self,
+        join_condition: str,
+        wm_filter: str,
+    ) -> list[str]:
+        """NTILE boundaries of predicate_column over the CSA join + watermark window."""
+        if not self.config.predicate_column:
+            return []
+        bounds_query = (
+            f"(SELECT MIN(main.{self.config.predicate_column}) AS boundary_val FROM ("
+            f"SELECT main.{self.config.predicate_column}, "
+            f"NTILE({self.runtime.num_partitions}) OVER "
+            f"(ORDER BY main.{self.config.predicate_column}) AS bucket "
+            f"FROM {self.derive_csa_table_name()} csa "
+            f"LEFT JOIN {self.config.source_table_name} main ON {join_condition} "
+            f"WHERE {wm_filter}"
+            f") sub WHERE bucket > 1 GROUP BY bucket) AS bounds"
+        )
+        return sorted(
+            row["boundary_val"]
+            for row in self.build_jdbc_reader(bounds_query).load().collect()
+            if row["boundary_val"] is not None
+        )
+
     def read_full_source_jdbc(self):
         source_query = f"(SELECT * FROM {self.config.source_table_name}) AS source_data"
 
@@ -94,7 +138,27 @@ class EpicCsaIngestionWorker(JdbcIngestionWorker):
             f"LEFT JOIN {self.config.source_table_name} main ON {join_condition} "
             f"WHERE {wm_filter}) AS csa_source"
         )
-        df = self.build_jdbc_reader(source_query).load()
+
+        if self.config.predicate_column:
+            boundaries = self._get_csa_predicate_boundaries(join_condition, wm_filter)
+            predicates = self.build_string_predicates(
+                self.config.predicate_column,
+                boundaries,
+            )
+            df = self.build_jdbc_reader_with_predicates(source_query, predicates)
+        elif self.config.partition_column:
+            lower_bound, upper_bound = self._get_csa_partition_bounds(
+                join_condition, wm_filter
+            )
+            df = self.build_jdbc_reader(
+                source_query,
+                self.config.partition_column,
+                lower_bound,
+                upper_bound,
+            ).load()
+        else:
+            df = self.build_jdbc_reader(source_query).load()
+
         for key in join_keys:
             df = df.withColumn(key, F.coalesce(F.col(key), F.col(f"_csa_key_{key}")))
         return df.drop(*[f"_csa_key_{key}" for key in join_keys])
