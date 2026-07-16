@@ -61,7 +61,7 @@ class EpicCsaIngestionWorker(JdbcIngestionWorker):
             df = self.build_jdbc_reader(source_query).load()
 
         if "_IS_DELETED" not in df.columns:
-            df = df.withColumn("_IS_DELETED", F.lit(0).cast("short"))
+            df = df.withColumn("_IS_DELETED", F.lit(False))
         if "_csa_update_dt" not in df.columns:
             df = df.withColumn(
                 "_csa_update_dt",
