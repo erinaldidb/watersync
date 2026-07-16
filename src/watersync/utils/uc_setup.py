@@ -21,6 +21,10 @@ class UnityCatalogSetup:
     def state_table(self) -> str:
         return f"{self.schema_fqn}.jdbc_ingestion_watermark"
 
+    @property
+    def log_table(self) -> str:
+        return f"{self.schema_fqn}.watersync_logs"
+
     def ensure_schema(self) -> None:
         self.spark.sql(f"CREATE SCHEMA IF NOT EXISTS IDENTIFIER('{self.schema_fqn}')")
 
@@ -43,6 +47,18 @@ class UnityCatalogSetup:
             CLUSTER BY AUTO
             COMMENT 'Configuration table for grouped JDBC ingestion jobs'
             TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true')
+        """)
+
+    def create_log_table(self) -> None:
+        self.spark.sql(f"""
+            CREATE TABLE IF NOT EXISTS IDENTIFIER('{self.log_table}') (
+              run_id        STRING  COMMENT 'UUID shared across one orchestration run — primary filter key',
+              log_timestamp STRING  COMMENT 'UTC ISO-8601 timestamp of the log event',
+              payload       VARIANT COMMENT 'Full log record as nested JSON: level, logger_name, message{{text, module, func, lineno, exc}}, ingestion_group, source_table'
+            )
+            USING DELTA
+            CLUSTER BY AUTO
+            COMMENT 'ZeroBus-backed structured log table for watersync runs'
         """)
 
     def create_watermark_state_table(self) -> None:
@@ -82,5 +98,6 @@ class UnityCatalogSetup:
         self.ensure_schema()
         self.create_config_table()
         self.create_watermark_state_table()
+        self.create_log_table()
         if truncate_existing:
             self.truncate_managed_objects()

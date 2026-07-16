@@ -1,7 +1,32 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
+
+_LOGGING_CONFIGURED = False
+
+
+def _configure_default_logging() -> None:
+    """Configure console logging for the watersync namespace (singleton)."""
+    global _LOGGING_CONFIGURED  # noqa: PLW0603
+    if _LOGGING_CONFIGURED:
+        return
+    _LOGGING_CONFIGURED = True
+
+    ws_logger = logging.getLogger("watersync")
+    ws_logger.setLevel(logging.INFO)
+    if not any(isinstance(h, logging.StreamHandler) for h in ws_logger.handlers):
+        console = logging.StreamHandler()
+        console.setLevel(logging.INFO)
+        console.setFormatter(
+            logging.Formatter(
+                "[%(asctime)s] %(levelname)-8s %(name)s \u2014 %(message)s",
+                datefmt="%H:%M:%S",
+            )
+        )
+        ws_logger.addHandler(console)
+    ws_logger.propagate = False
 
 
 @dataclass(frozen=True)
@@ -19,6 +44,9 @@ class JdbcRuntimeSettings:
     fetch_size: int = 10000
     num_partitions: int = 8
     connection_name: str = "slalom_jdbc_conn"
+
+    def __post_init__(self) -> None:
+        _configure_default_logging()
 
     @property
     def config_table(self) -> str:

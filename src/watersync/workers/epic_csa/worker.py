@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
+
 from pyspark.sql import functions as F
 
 from watersync.common import quote_sql_string
 from watersync.models import ReadResult
 from watersync.workers.base import JdbcIngestionWorker
+
+logger = logging.getLogger(__name__)
 
 
 class EpicCsaIngestionWorker(JdbcIngestionWorker):
@@ -164,16 +168,46 @@ class EpicCsaIngestionWorker(JdbcIngestionWorker):
         return df.drop(*[f"_csa_key_{key}" for key in join_keys])
 
     def read_source(self) -> ReadResult:
+        _ctx = {
+            "ingestion_group": self.config.ingestion_group,
+            "source_table": self.config.source_table_name,
+        }
         last_csa_bigint = int(self.get_last_watermark())
         new_csa_watermark = self.get_csa_max_watermark()
+
         if new_csa_watermark is None:
+            logger.info(
+                "[READ-CSA] %s — CSA table is empty, skipping",
+                self.config.source_table_name,
+                extra=_ctx,
+            )
             return ReadResult(df=None, skip=True)
 
         if last_csa_bigint == -1:
+            logger.info(
+                "[READ-CSA] %s — first run, performing full load  csa_wm=%d",
+                self.config.source_table_name,
+                new_csa_watermark,
+                extra=_ctx,
+            )
             source_df = self.read_full_source_jdbc()
         else:
             if new_csa_watermark <= last_csa_bigint:
+                logger.info(
+                    "[READ-CSA] %s — no new CSA events (last=%d, current=%d), skipping",
+                    self.config.source_table_name,
+                    last_csa_bigint,
+                    new_csa_watermark,
+                    extra=_ctx,
+                )
                 return ReadResult(df=None, skip=True)
+            logger.info(
+                "[READ-CSA] %s — incremental via CSA  window=%d→%d",
+                self.config.source_table_name,
+                last_csa_bigint,
+                new_csa_watermark,
+                extra=_ctx,
+            )
             source_df = self.read_source_jdbc_via_csa(
                 last_csa_bigint,
                 new_csa_watermark,

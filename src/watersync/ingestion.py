@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from watersync.common import (
@@ -15,6 +16,8 @@ from watersync.workers import (
     JdbcIngestionWorker,
     TimestampWatermarkIngestionWorker,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class JdbcIngestionConfigRepository:
@@ -79,6 +82,12 @@ class JdbcIngestionConfigRepository:
                     f"Incremental config row for {config.source_table_name} requires watermark_column"
                 )
             configs.append(config)
+        logger.info(
+            "[CONFIG] Loaded %d config(s)  group=%s  table_filter=%s",
+            len(configs),
+            ingestion_group or "(all)",
+            source_table_name or "(all)",
+        )
         return configs
 
 
@@ -98,16 +107,48 @@ class JdbcIngestionOrchestrator:
             ingestion_group=self.runtime.ingestion_group,
             source_table_name=self.runtime.source_table_name,
         )
+        logger.info(
+            "[ORCH]   Starting ingestion run  group=%s  tables=%d",
+            self.runtime.ingestion_group or "(all)",
+            len(configs),
+        )
         results: list[dict[str, Any]] = []
         for config in configs:
             worker = self.build_worker(config)
             try:
-                results.append(worker.process())
+                result = worker.process()
+                results.append(result)
+                logger.info(
+                    "[ORCH]   %s — %s",
+                    config.source_table_name,
+                    result["status"],
+                    extra={
+                        "ingestion_group": config.ingestion_group,
+                        "source_table": config.source_table_name,
+                    },
+                )
             except Exception as exc:
                 worker.update_watermark_state(None, "FAILED", str(exc)[:4000])
                 results.append(worker._result("FAILED", error=str(exc)))
+                logger.error(
+                    "[ORCH]   %s — FAILED: %s",
+                    config.source_table_name,
+                    str(exc)[:500],
+                    exc_info=True,
+                    extra={
+                        "ingestion_group": config.ingestion_group,
+                        "source_table": config.source_table_name,
+                    },
+                )
 
         failed = [result for result in results if result["status"] == "FAILED"]
+        logger.info(
+            "[ORCH]   Run complete  total=%d  success=%d  skipped=%d  failed=%d",
+            len(results),
+            sum(1 for r in results if r["status"] == "SUCCESS"),
+            sum(1 for r in results if r["status"] == "SKIPPED"),
+            len(failed),
+        )
         if failed:
             raise RuntimeError(f"{len(failed)} table(s) failed during ingestion")
         return results

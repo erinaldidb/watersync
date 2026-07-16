@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 authors = [{ name = "Emanuele Rinaldi" }]
 dependencies = [
   "databricks-sdk>=0.120.0",
+  "databricks-zerobus-ingest-sdk",
   "psycopg2-binary>=2.9.9",
 ]
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
 from typing import Any
@@ -10,6 +11,8 @@ from pyspark.sql import functions as F
 from watersync.common import quote_sql_string
 from watersync.models import IngestionConfig, JdbcRuntimeSettings, ReadResult
 
+logger = logging.getLogger(__name__)
+
 
 class JdbcIngestionWorker(ABC):
     def __init__(self, spark: Any, runtime: JdbcRuntimeSettings, config: IngestionConfig):
@@ -19,14 +22,37 @@ class JdbcIngestionWorker(ABC):
         self.staging_table_fqn = f"{runtime.catalog}.{runtime.schema}.{config.target_table_name}"
 
     def process(self) -> dict[str, Any]:
+        _ctx = {
+            "ingestion_group": self.config.ingestion_group,
+            "source_table": self.config.source_table_name,
+        }
+        logger.info(
+            "[START] %s / %s  type=%s  target=%s",
+            self.config.ingestion_group,
+            self.config.source_table_name,
+            self.config.ingestion_type,
+            self.staging_table_fqn,
+            extra=_ctx,
+        )
         read_result = self.read_source()
         if read_result.skip:
+            logger.info(
+                "[SKIP]  %s — no new data in watermark window",
+                self.config.source_table_name,
+                extra=_ctx,
+            )
             self.update_watermark_state(None, "SKIPPED", None)
             return self._result("SKIPPED")
 
         _, max_staging_watermark = self.write_to_staging(read_result.df)
         watermark_to_store = self.resolve_watermark_to_store(read_result, max_staging_watermark)
         self.update_watermark_state(watermark_to_store, "SUCCESS", None)
+        logger.info(
+            "[DONE]  %s — status=SUCCESS  new_watermark=%s",
+            self.config.source_table_name,
+            watermark_to_store,
+            extra=_ctx,
+        )
         return self._result("SUCCESS", watermark_to_store)
 
     def _result(
@@ -118,9 +144,17 @@ class JdbcIngestionWorker(ABC):
             LIMIT 1
             """
         ).first()
-        if row and row["last_watermark"] is not None:
-            return str(row["last_watermark"])
-        return "1900-01-01 00:00:00"
+        watermark = str(row["last_watermark"]) if row and row["last_watermark"] is not None else "1900-01-01 00:00:00"
+        logger.debug(
+            "[WATERMARK] %s — last_watermark=%s",
+            self.config.source_table_name,
+            watermark,
+            extra={
+                "ingestion_group": self.config.ingestion_group,
+                "source_table": self.config.source_table_name,
+            },
+        )
+        return watermark
 
     def get_partition_bounds(
         self,
@@ -242,6 +276,18 @@ class JdbcIngestionWorker(ABC):
         return self.build_jdbc_reader(source_query).load()
 
     def write_to_staging(self, df):
+        _ctx = {
+            "ingestion_group": self.config.ingestion_group,
+            "source_table": self.config.source_table_name,
+        }
+        write_mode = "overwrite" if self.config.ingestion_type == "full" else "append"
+        logger.info(
+            "[WRITE]  %s → %s  mode=%s",
+            self.config.source_table_name,
+            self.staging_table_fqn,
+            write_mode,
+            extra=_ctx,
+        )
         df_with_metadata = (
             df.withColumn("_ingested_at", F.current_timestamp())
             .withColumn("_source_table", F.lit(self.config.source_table_name))
@@ -262,6 +308,12 @@ class JdbcIngestionWorker(ABC):
                 .select(F.max(F.col(self.config.watermark_column)).alias("max_wm"))
                 .first()["max_wm"]
             )
+        logger.info(
+            "[WRITE]  %s — staging write complete  max_watermark=%s",
+            self.staging_table_fqn,
+            max_watermark,
+            extra=_ctx,
+        )
         return self.staging_table_fqn, max_watermark
 
     def update_watermark_state(
@@ -270,6 +322,18 @@ class JdbcIngestionWorker(ABC):
         status: str,
         error_message: str | None = None,
     ) -> None:
+        _ctx = {
+            "ingestion_group": self.config.ingestion_group,
+            "source_table": self.config.source_table_name,
+        }
+        logger.debug(
+            "[STATE]  %s — storing watermark=%s  status=%s%s",
+            self.config.source_table_name,
+            max_watermark,
+            status,
+            f"  error={error_message[:120]}" if error_message else "",
+            extra=_ctx,
+        )
         now = datetime.now()
         state_df = self.spark.createDataFrame(
             [

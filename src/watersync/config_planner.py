@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Callable
 
 from watersync.common import quote_sql_string, row_to_dict
 from watersync.models import JdbcRuntimeSettings
+
+logger = logging.getLogger(__name__)
 
 
 class JdbcIngestionConfigRepository:
@@ -30,6 +33,11 @@ class JdbcIngestionConfigRepository:
         configs = [row_to_dict(row) for row in self.spark.sql(query).collect()]
         if not configs:
             raise ValueError(f"No enabled config rows found for ingestion_group={ingestion_group}")
+        logger.info(
+            "[PLAN]   Loaded %d config(s) for ingestion_group=%s",
+            len(configs),
+            ingestion_group,
+        )
         return configs
 
 
