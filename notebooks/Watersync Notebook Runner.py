@@ -94,8 +94,8 @@ dbutils.widgets.text(
 )
 dbutils.widgets.text("foreach_concurrency", "4", "ForEach concurrency")
 
-dbutils.widgets.text("project_id", "slalom-jdbc-test", "Lakebase project id")
-dbutils.widgets.text("project_display_name", "Slalom JDBC Test DB", "Lakebase project display name")
+dbutils.widgets.text("project_id", "jdbc-test", "Lakebase project id")
+dbutils.widgets.text("project_display_name", "JDBC Test DB", "Lakebase project display name")
 dbutils.widgets.text("customer_count", "200", "Lakebase customer seed count")
 dbutils.widgets.text("product_count", "100", "Lakebase product seed count")
 dbutils.widgets.text("order_count", "500", "Lakebase order seed count")
