@@ -40,9 +40,26 @@ class EpicCsaIngestionWorker(JdbcIngestionWorker):
         return None
 
     def read_full_source_jdbc(self):
-        df = self.build_jdbc_reader(
-            f"(SELECT * FROM {self.config.source_table_name}) AS source_data"
-        ).load()
+        source_query = f"(SELECT * FROM {self.config.source_table_name}) AS source_data"
+
+        if self.config.predicate_column:
+            boundaries = self.build_predicate_boundaries()
+            predicates = self.build_string_predicates(
+                self.config.predicate_column,
+                boundaries,
+            )
+            df = self.build_jdbc_reader_with_predicates(source_query, predicates)
+        elif self.config.partition_column:
+            lower_bound, upper_bound = self.get_partition_bounds()
+            df = self.build_jdbc_reader(
+                source_query,
+                self.config.partition_column,
+                lower_bound,
+                upper_bound,
+            ).load()
+        else:
+            df = self.build_jdbc_reader(source_query).load()
+
         if "_IS_DELETED" not in df.columns:
             df = df.withColumn("_IS_DELETED", F.lit(0).cast("short"))
         if "_csa_update_dt" not in df.columns:
