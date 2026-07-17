@@ -72,7 +72,7 @@ class EpicCsaIngestionWorker(JdbcIngestionWorker):
         if not self.config.predicate_column:
             return []
         bounds_query = (
-            f"(SELECT MIN(main.{self.config.predicate_column}) AS boundary_val FROM ("
+            f"(SELECT MIN({self.config.predicate_column}) AS boundary_val FROM ("
             f"SELECT main.{self.config.predicate_column}, "
             f"NTILE({self.runtime.num_partitions}) OVER "
             f"(ORDER BY main.{self.config.predicate_column}) AS bucket "
