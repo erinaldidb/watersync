@@ -63,6 +63,12 @@ class JdbcRuntimeSettings:
             properties["user"] = self.jdbc_user
         if self.jdbc_password:
             properties["password"] = self.jdbc_password
+        elif self.jdbc_secret_scope and self.jdbc_secret_key:
+            from databricks.sdk.runtime import dbutils
+
+            properties["password"] = dbutils.secrets.get(
+                scope=self.jdbc_secret_scope, key=self.jdbc_secret_key
+            )
         return properties
 
 
