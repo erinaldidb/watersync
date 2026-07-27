@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service import pipelines as pl
-from databricks.sdk.service.compute import Environment
+from databricks.sdk.service.compute import AutoScale, ClusterSpec, DataSecurityMode, Environment, Library
 from databricks.sdk.service.jobs import (
     ForEachTask,
+    JobCluster,
     JobEnvironment,
     JobParameterDefinition,
     JobSettings,

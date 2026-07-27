@@ -33,7 +33,7 @@ class CdcScd2PipelineBuilder:
             raise ValueError(f"No enabled config rows found{suffix}")
         return configs
 
-    def make_snapshot_source(self, staging_fqn: str):
+    def make_snapshot_source(self, staging_fqn: str, drop_columns: list[str] | None = None):
         def next_snapshot_and_version(latest_snapshot_version):
             versions = [
                 row["version"]
@@ -45,6 +45,11 @@ class CdcScd2PipelineBuilder:
             if next_version is None:
                 return None
             df = self.spark.read.format("delta").option("versionAsOf", next_version).table(staging_fqn)
+            if drop_columns:
+                existing = set(df.columns)
+                to_drop = [c for c in drop_columns if c in existing]
+                if to_drop:
+                    df = df.drop(*to_drop)
             return df, next_version
         return next_snapshot_and_version
 
@@ -105,10 +110,9 @@ class CdcScd2PipelineBuilder:
     def register_snapshot_flow(self, history_table: str, staging_fqn: str, key_columns: list[str]) -> None:
         self.dp.create_auto_cdc_from_snapshot_flow(
             target=history_table,
-            source=self.make_snapshot_source(staging_fqn),
+            source=self.make_snapshot_source(staging_fqn, drop_columns=_METADATA_COLUMNS),
             keys=key_columns,
             stored_as_scd_type=2,
-            except_column_list=_METADATA_COLUMNS,
         )
 
     def build(self) -> None:

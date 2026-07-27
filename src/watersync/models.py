@@ -114,3 +114,4 @@ class JobProvisioningSettings:
     num_partitions: str = "8"
     cdc_pipeline_id: str = ""
     cdc_pipeline_file_path: str = ""
+    use_serverless: bool = True
