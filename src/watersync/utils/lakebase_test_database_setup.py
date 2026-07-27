@@ -4,9 +4,29 @@ import itertools
 import random
 from datetime import datetime, timedelta
 
-import psycopg2
-from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.postgres import Project, ProjectSpec
+try:
+    import psycopg2
+except (ImportError, OSError):
+    psycopg2 = None  # Not available in pipeline serverless context
+
+try:
+    from databricks.sdk import WorkspaceClient
+except (ImportError, OSError):
+    WorkspaceClient = None
+
+try:
+    from databricks.sdk.service.postgres import Project, ProjectSpec
+except (ImportError, ModuleNotFoundError):
+    Project = None
+    ProjectSpec = None
+
+
+def _require_psycopg2():
+    if psycopg2 is None:
+        raise ImportError(
+            "psycopg2 is required for LakebaseTestDatabaseSetup but is not installed. "
+            "Install it with: pip install psycopg2-binary"
+        )
 
 
 class LakebaseTestDatabaseSetup:
@@ -15,8 +35,10 @@ class LakebaseTestDatabaseSetup:
         project_id: str = "slalom-jdbc-test",
         project_display_name: str = "Slalom JDBC Test DB",
         database_name: str = "databricks_postgres",
-        workspace_client: WorkspaceClient | None = None,
+        workspace_client: "WorkspaceClient | None" = None,
     ):
+        if WorkspaceClient is None:
+            raise ImportError("databricks-sdk is required for LakebaseTestDatabaseSetup")
         self.w = workspace_client or WorkspaceClient()
         self.project_id = project_id
         self.project_display_name = project_display_name
@@ -42,6 +64,7 @@ class LakebaseTestDatabaseSetup:
         return self.w.postgres.generate_database_credential(endpoint=endpoint_name).token
 
     def connection(self):
+        _require_psycopg2()
         _, endpoint = self.resolve_endpoint()
         token = self.generate_token(endpoint.name)
         return psycopg2.connect(
@@ -155,7 +178,7 @@ class LakebaseTestDatabaseSetup:
         return {
             "jdbc_url": f"jdbc:postgresql://{host}:5432/{self.database_name}?sslmode=require",
             "jdbc_user": self.username,
-            "jdbc_password_hint": f"w.postgres.generate_database_credential(endpoint='{endpoint.name}').token",
+            "jdbc_password_hint": f"w.postgres.generate_database_credential(endpoint=\'{endpoint.name}\').token",
             "jdbc_driver": "org.postgresql.Driver",
             "fetch_size": "10000",
             "num_partitions": "8",

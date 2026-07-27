@@ -45,13 +45,13 @@ def plan_configs_main(**kwargs) -> None:
         parser.add_argument("--catalog", required=True)
         parser.add_argument("--schema", required=True)
         parser.add_argument("--ingestion-group", dest="ingestion_group", required=True)
-        parser.add_argument("--publish-task-value", action="store_true")
+        parser.add_argument("--publish-task-value", default="false")
         args = parser.parse_args()
 
     spark = active_spark()
     planner = IngestionConfigPlanner(spark=spark, runtime=build_runtime_settings(args))
     payload = planner.build_for_each_inputs_json(args.ingestion_group)
-    if getattr(args, "publish_task_value", False):
+    if str(getattr(args, "publish_task_value", "false")).lower() in ("true", "1", "yes"):
         try:
             from pyspark.dbutils import DBUtils
 

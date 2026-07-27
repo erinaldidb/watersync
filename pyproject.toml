@@ -11,9 +11,12 @@ requires-python = ">=3.10"
 authors = [{ name = "Emanuele Rinaldi" }]
 dependencies = [
   "databricks-sdk>=0.120.0",
-  "databricks-zerobus-ingest-sdk",
-  "psycopg2-binary>=2.9.9",
 ]
+
+[project.optional-dependencies]
+lakebase = ["psycopg2-binary>=2.9.9"]
+zerobus = ["databricks-zerobus-ingest-sdk"]
+all = ["psycopg2-binary>=2.9.9", "databricks-zerobus-ingest-sdk"]
 
 [project.scripts]
 watersync-plan-configs = "watersync.cli:plan_configs_main"

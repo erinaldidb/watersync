@@ -95,10 +95,9 @@ class JobProvisioningSettings:
     ingestion_group: str
     catalog: str
     schema: str
+    planner_notebook_path: str
+    worker_notebook_path: str
     wheel_uri: str
-    package_name: str = "watersync"
-    planner_entry_point: str = "watersync-plan-configs"
-    worker_entry_point: str = "watersync-run-ingestion"
     foreach_concurrency: int = 4
     jdbc_url: str = ""
     jdbc_user: str = ""

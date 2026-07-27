@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service import pipelines as pl
-from databricks.sdk.service.compute import Library
+from databricks.sdk.service.compute import Environment
 from databricks.sdk.service.jobs import (
     ForEachTask,
+    JobEnvironment,
     JobParameterDefinition,
     JobSettings,
+    NotebookTask,
     PipelineTask,
-    PythonWheelTask,
+    Source,
     Task,
     TaskDependency,
 )
@@ -46,54 +48,41 @@ class IngestionJobProvisioner:
                 "pipeline.ingestion_group": settings.ingestion_group,
             },
             libraries=[pl.PipelineLibrary(file=pl.FileLibrary(path=settings.cdc_pipeline_file_path))],
+            environment=pl.PipelinesEnvironment(dependencies=[settings.wheel_uri]),
             serverless=True,
             channel="CURRENT",
         )
         return created.pipeline_id
 
     def build_job_settings(self, settings: JobProvisioningSettings, pipeline_id: str) -> JobSettings:
-        if not settings.wheel_uri:
-            raise ValueError("wheel_uri is required for Python wheel tasks")
-
-        common_parameters = {
-            "catalog": settings.catalog,
-            "schema": settings.schema,
-            "jdbc_url": settings.jdbc_url,
-            "jdbc_user": settings.jdbc_user,
-            "jdbc_secret_scope": settings.jdbc_secret_scope,
-            "jdbc_secret_key": settings.jdbc_secret_key,
-            "watermark_threshold_minutes": settings.watermark_threshold_minutes,
-            "fetch_size": settings.fetch_size,
-            "num_partitions": settings.num_partitions,
-        }
-        wheel_library = [Library(whl=settings.wheel_uri)]
+        env_key = "Default"
+        environments = [
+            JobEnvironment(
+                environment_key=env_key,
+                spec=Environment(client="1", dependencies=[settings.wheel_uri]),
+            )
+        ]
 
         planner_task = Task(
             task_key="ingestion_configs",
             description="Build one For each item per enabled source table.",
-            python_wheel_task=PythonWheelTask(
-                package_name=settings.package_name,
-                entry_point="watersync-plan-configs",
-                named_parameters={
-                    "ingestion_group": settings.ingestion_group,
-                    **common_parameters,
-                },
+            notebook_task=NotebookTask(
+                notebook_path=settings.planner_notebook_path,
+                source=Source.WORKSPACE,
             ),
-            libraries=wheel_library,
+            environment_key=env_key,
         )
 
         worker_iteration = Task(
             task_key="ingestion_worker_iteration",
-            python_wheel_task=PythonWheelTask(
-                package_name=settings.package_name,
-                entry_point="watersync-run-ingestion",
-                named_parameters={
-                    "ingestion_group": settings.ingestion_group,
+            notebook_task=NotebookTask(
+                notebook_path=settings.worker_notebook_path,
+                base_parameters={
                     "source_table_name": "{{input.source_table_name}}",
-                    **common_parameters,
                 },
+                source=Source.WORKSPACE,
             ),
-            libraries=wheel_library,
+            environment_key=env_key,
         )
 
         ingestion_worker = Task(
@@ -130,6 +119,7 @@ class IngestionJobProvisioner:
             ],
             tasks=[planner_task, ingestion_worker, cdc_task],
             max_concurrent_runs=1,
+            environments=environments,
         )
 
     def create_or_update_job(self, settings: JobProvisioningSettings) -> dict[str, str | int]:
@@ -145,6 +135,7 @@ class IngestionJobProvisioner:
                 parameters=job_settings.parameters,
                 tasks=job_settings.tasks,
                 max_concurrent_runs=job_settings.max_concurrent_runs,
+                environments=job_settings.environments,
             )
             job_id = result.job_id
         return {
