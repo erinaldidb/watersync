@@ -73,7 +73,7 @@ class CdcScd2PipelineBuilder:
             comment=f"Upsert events (_IS_DELETED=0 or NULL full-load rows) from {staging_fqn}",
         )
         def _make_upsert_view(_tbl=staging_fqn):
-            return self.spark.readStream.table(_tbl).filter("COALESCE(_IS_DELETED, 0) = 0")
+            return self.spark.readStream.table(_tbl).filter("_IS_DELETED IS NOT TRUE")
 
         self.dp.create_auto_cdc_flow(
             name=f"{history_table}_upserts",
@@ -105,7 +105,7 @@ class CdcScd2PipelineBuilder:
 
         @self.dp.update_flow(target=sink_name, name=f"{history_table}_close_deletes")
         def _close_deletes_flow(_tbl=staging_fqn, _keys=list(key_columns)):
-            return self.spark.readStream.table(_tbl).filter("_IS_DELETED = 1").select(*_keys, "_csa_update_dt")
+            return self.spark.readStream.table(_tbl).filter("_IS_DELETED IS TRUE").select(*_keys, "_csa_update_dt")
 
     def register_snapshot_flow(self, history_table: str, staging_fqn: str, key_columns: list[str]) -> None:
         self.dp.create_auto_cdc_from_snapshot_flow(
