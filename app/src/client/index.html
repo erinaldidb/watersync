@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Watersync Monitor</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      --db-orange: #FF3621;
+      --db-dark: #1B3139;
+      --db-blue: #00A972;
+    }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    .status-healthy { color: #00A972; }
+    .status-warning { color: #F2A900; }
+    .status-error { color: #FF3621; }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+  <div id="root"></div>
+  <script type="module" src="/main.tsx"></script>
+</body>
+</html>

@@ -1,0 +1,49 @@
+bundle:
+  name: watersync_app
+
+variables:
+  catalog:
+    description: Unity Catalog catalog for watersync tables
+    default: serverless_pixels_release_catalog
+  schema:
+    description: Schema containing ingestion config and watermark tables
+    default: jdbc_incremental_gh
+  warehouse_id:
+    description: SQL Warehouse ID for app queries
+    default: ""
+
+resources:
+  apps:
+    watersync_monitor:
+      name: watersync-monitor
+      source_code_path: .
+      description: |
+        Watersync Pipeline Monitor — configure ingestion groups,
+        monitor watermark state, view pipeline runs and logs.
+      config:
+        - name: WATERSYNC_CATALOG
+          value: ${var.catalog}
+        - name: WATERSYNC_SCHEMA
+          value: ${var.schema}
+        - name: DATABRICKS_WAREHOUSE_ID
+          value: ${var.warehouse_id}
+      resources:
+        - name: watersync-sql-warehouse
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+      permissions:
+        - user_name: emanuele.rinaldi@databricks.com
+          level: CAN_MANAGE
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://fevm-serverless-pixels-release.cloud.databricks.com
+  prod:
+    mode: production
+    workspace:
+      host: https://fevm-serverless-pixels-release.cloud.databricks.com
+    root_path: /Workspace/Users/emanuele.rinaldi@databricks.com/.bundle/${bundle.name}/${bundle.target}

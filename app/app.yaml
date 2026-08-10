@@ -1,0 +1,10 @@
+command: ["node", "dist/server/index.js"]
+env:
+  - name: NODE_ENV
+    value: production
+  - name: WATERSYNC_CATALOG
+    valueFrom: WATERSYNC_CATALOG
+  - name: WATERSYNC_SCHEMA
+    valueFrom: WATERSYNC_SCHEMA
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: DATABRICKS_WAREHOUSE_ID
