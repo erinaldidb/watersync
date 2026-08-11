@@ -31,11 +31,14 @@ const keySchema = locationSchema.extend({ ingestionGroup: z.string().min(1), sou
 const watermarkSchema = keySchema.extend({ lastWatermark: z.string().nullable(), status: z.string().min(1) });
 const jobPayloadSchema = locationSchema.extend({
   ingestionGroup: z.string().min(1),
-  plannerNotebookPath: z.string().min(1),
-  workerNotebookPath: z.string().min(1),
+  gitUrl: z.url().refine((value) => new URL(value).hostname === 'github.com', 'Repository must be hosted on GitHub'),
+  gitBranch: z.string().trim().min(1),
   foreachConcurrency: z.number().int().min(1).max(100),
   cdcPipelineId: z.string().trim().optional(),
 });
+
+const plannerNotebookPath = 'notebooks/Task - Plan Configs';
+const workerNotebookPath = 'notebooks/Task - Run Ingestion';
 
 const workspace = new WorkspaceClient({});
 const requiredEnv = (name: string) => {
@@ -200,7 +203,7 @@ await createApp({
           const tasks: jobs.Task[] = [
             {
               task_key: 'ingestion_configs',
-              notebook_task: { notebook_path: body.plannerNotebookPath, source: 'WORKSPACE' },
+              notebook_task: { notebook_path: plannerNotebookPath, source: 'GIT' },
             },
             {
               task_key: 'ingestion_worker',
@@ -211,8 +214,8 @@ await createApp({
                 task: {
                   task_key: 'ingestion_worker_iteration',
                   notebook_task: {
-                    notebook_path: body.workerNotebookPath,
-                    source: 'WORKSPACE',
+                    notebook_path: workerNotebookPath,
+                    source: 'GIT',
                     base_parameters: { source_table_name: '{{input.source_table_name}}' },
                   },
                 },
@@ -235,6 +238,11 @@ await createApp({
               { name: 'ingestion_group', default: body.ingestionGroup },
             ],
             tasks,
+            git_source: {
+              git_url: body.gitUrl,
+              git_provider: 'gitHub',
+              git_branch: body.gitBranch,
+            },
           };
           const existing = [];
           for await (const job of workspace.jobs.list({ name, limit: 25, expand_tasks: false })) {

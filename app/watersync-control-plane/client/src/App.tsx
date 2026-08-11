@@ -39,6 +39,10 @@ import {
   TableHead,
   TableHeader,
   TableRow,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
   useAnalyticsQuery,
 } from '@databricks/appkit-ui/react';
 import {
@@ -625,52 +629,69 @@ function ConfigDialog({
   };
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-4xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{row ? 'Edit' : 'Add'} configuration</DialogTitle>
           <DialogDescription>Values map directly to jdbc_ingestion_config.</DialogDescription>
         </DialogHeader>
-        <form onSubmit={(event) => void submit(event)} className="grid gap-3 md:grid-cols-2">
-          {error && (
-            <div className="md:col-span-2">
-              <ErrorState message={error} />
-            </div>
-          )}
-          <Field name="group" label="Ingestion group" value={row?.ingestion_group} />
-          <Field name="source" label="Source table" value={row?.source_table_name} />
-          <Field name="target_fqn" label="Final target FQN" value={row?.target_table_fqn} required />
-          <Field name="staging_fqn" label="Staging table FQN" value={row?.staging_table_fqn} />
-          <Field name="keys" label="Key columns" value={row?.key_columns} />
-          <Field name="watermark" label="Watermark column" value={row?.watermark_column} />
-          <Field name="partition" label="Partition column" value={row?.partition_column} />
-          <Field name="predicate" label="Predicate column" value={row?.predicate_column} />
-          <Field name="jdbc_url" label="JDBC URL" value={row?.jdbc_url} />
-          <Field name="jdbc_user" label="JDBC user" value={row?.jdbc_user} />
-          <Field name="jdbc_secret_scope" label="JDBC secret scope" value={row?.jdbc_secret_scope} />
-          <Field name="jdbc_secret_key" label="JDBC secret key" value={row?.jdbc_secret_key} />
-          <Field name="connection_name" label="UC connection name" value={row?.connection_name} />
-          <Field
-            name="watermark_threshold_minutes"
-            label="Watermark delay (minutes)"
-            value={String(row?.watermark_threshold_minutes ?? 5)}
-          />
-          <Field name="fetch_size" label="JDBC fetch size" value={String(row?.fetch_size ?? 10000)} />
-          <Field name="num_partitions" label="JDBC partitions" value={String(row?.num_partitions ?? 8)} />
-          <div>
-            <Label htmlFor="type">Ingestion type</Label>
-            <Select name="type" defaultValue={row?.ingestion_type ?? 'incremental'}>
-              <SelectTrigger id="type">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="incremental">Incremental</SelectItem>
-                <SelectItem value="full">Full</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <Toggle name="enabled" label="Enabled" checked={row?.enabled ?? true} />
-          <Toggle name="epic" label="EPIC CSA mode" checked={row?.epic_csa_enabled ?? false} />
-          <DialogFooter className="md:col-span-2">
+        <form onSubmit={(event) => void submit(event)} className="space-y-4">
+          {error && <ErrorState message={error} />}
+          <Tabs defaultValue="mapping" className="w-full">
+            <TabsList className="grid w-full grid-cols-3">
+              <TabsTrigger value="mapping">Source mapping</TabsTrigger>
+              <TabsTrigger value="incremental">Incremental settings</TabsTrigger>
+              <TabsTrigger value="connection">Connection &amp; runtime</TabsTrigger>
+            </TabsList>
+            <TabsContent value="mapping" forceMount className="mt-4 data-[state=inactive]:hidden">
+              <div className="grid gap-4 md:grid-cols-2">
+                <Field name="group" label="Ingestion group" value={row?.ingestion_group} />
+                <Field name="source" label="Source table" value={row?.source_table_name} />
+                <Field name="target_fqn" label="Final target FQN" value={row?.target_table_fqn} required />
+                <Field name="staging_fqn" label="Staging table FQN" value={row?.staging_table_fqn} />
+                <div>
+                  <Label htmlFor="type">Ingestion type</Label>
+                  <Select name="type" defaultValue={row?.ingestion_type ?? 'incremental'}>
+                    <SelectTrigger id="type" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="incremental">Incremental</SelectItem>
+                      <SelectItem value="full">Full</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Toggle name="enabled" label="Enabled" checked={row?.enabled ?? true} />
+              </div>
+            </TabsContent>
+            <TabsContent value="incremental" forceMount className="mt-4 data-[state=inactive]:hidden">
+              <div className="grid gap-4 md:grid-cols-2">
+                <Field name="keys" label="Key columns" value={row?.key_columns} />
+                <Field name="watermark" label="Watermark column" value={row?.watermark_column} />
+                <Field name="partition" label="Partition column" value={row?.partition_column} />
+                <Field name="predicate" label="Predicate column" value={row?.predicate_column} />
+                <Field
+                  name="watermark_threshold_minutes"
+                  label="Watermark delay (minutes)"
+                  value={String(row?.watermark_threshold_minutes ?? 5)}
+                />
+                <Toggle name="epic" label="EPIC CSA mode" checked={row?.epic_csa_enabled ?? false} />
+              </div>
+            </TabsContent>
+            <TabsContent value="connection" forceMount className="mt-4 data-[state=inactive]:hidden">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="md:col-span-2">
+                  <Field name="jdbc_url" label="JDBC URL" value={row?.jdbc_url} />
+                </div>
+                <Field name="jdbc_user" label="JDBC user" value={row?.jdbc_user} />
+                <Field name="connection_name" label="UC connection name" value={row?.connection_name} />
+                <Field name="jdbc_secret_scope" label="JDBC secret scope" value={row?.jdbc_secret_scope} />
+                <Field name="jdbc_secret_key" label="JDBC secret key" value={row?.jdbc_secret_key} />
+                <Field name="fetch_size" label="JDBC fetch size" value={String(row?.fetch_size ?? 10000)} />
+                <Field name="num_partitions" label="JDBC partitions" value={String(row?.num_partitions ?? 8)} />
+              </div>
+            </TabsContent>
+          </Tabs>
+          <DialogFooter>
             <Button type="submit" disabled={busy}>
               {busy ? 'Saving…' : 'Save configuration'}
             </Button>
@@ -692,7 +713,7 @@ function Field({
   required?: boolean;
 }) {
   return (
-    <div>
+    <div className="space-y-2">
       <Label htmlFor={name}>{label}</Label>
       <Input
         id={name}
@@ -1028,8 +1049,8 @@ function JobDialog({
         body: JSON.stringify({
           ...location,
           ingestionGroup,
-          plannerNotebookPath: form.get('plannerNotebookPath'),
-          workerNotebookPath: form.get('workerNotebookPath'),
+          gitUrl: form.get('gitUrl'),
+          gitBranch: form.get('gitBranch'),
           foreachConcurrency: Number(form.get('foreachConcurrency')),
           cdcPipelineId: form.get('cdcPipelineId'),
         }),
@@ -1044,7 +1065,7 @@ function JobDialog({
   };
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="w-[calc(100vw-2rem)] max-w-4xl">
         <DialogHeader>
           <DialogTitle>Create or update a WaterSync job</DialogTitle>
           <DialogDescription>
@@ -1054,83 +1075,89 @@ function JobDialog({
         <form onSubmit={(event) => void submit(event)} className="space-y-4">
           {error && <ErrorState message={error} />}
           {groupsError && <ErrorState message={groupsError} />}
-          <div className="space-y-2">
-            <Label htmlFor="ingestion-group">Ingestion group</Label>
-            {groupsLoading ? (
-              <Skeleton className="h-10" />
-            ) : groups.length ? (
-              <Select value={ingestionGroup} onValueChange={setIngestionGroup}>
-                <SelectTrigger id="ingestion-group">
-                  <SelectValue placeholder="Select an ingestion group" />
-                </SelectTrigger>
-                <SelectContent>
-                  {groups.map((group) => (
-                    <SelectItem key={group.ingestion_group} value={group.ingestion_group}>
-                      {group.ingestion_group} · {group.enabled_source_count} enabled sources
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : (
-              <Empty>
-                <EmptyHeader>
-                  <EmptyTitle>No ingestion groups found</EmptyTitle>
-                  <EmptyDescription>Add a row to the configuration table before creating a job.</EmptyDescription>
-                </EmptyHeader>
-              </Empty>
-            )}
-          </div>
-          {selectedGroup && (
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-base">Generated job</CardTitle>
-                <CardDescription>
-                  [{selectedGroup.ingestion_group}] Ingestion Pipeline · {selectedGroup.source_count} configured sources
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-1 text-sm text-muted-foreground">
-                <div>configuration_fqn: {fqn(location, 'jdbc_ingestion_config')}</div>
-                <div>watermark_fqn: {fqn(location, 'jdbc_ingestion_watermark')}</div>
-                <div>ingestion_group: {selectedGroup.ingestion_group}</div>
-              </CardContent>
-            </Card>
-          )}
-          <div className="grid gap-4 md:grid-cols-2">
-            <div className="space-y-2">
-              <Label htmlFor="planner-notebook">Planner notebook</Label>
-              <Input
-                id="planner-notebook"
-                name="plannerNotebookPath"
-                defaultValue="/Workspace/Shared/watersync/Task - Plan Configs"
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="worker-notebook">Worker notebook</Label>
-              <Input
-                id="worker-notebook"
-                name="workerNotebookPath"
-                defaultValue="/Workspace/Shared/watersync/Task - Run Ingestion"
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="concurrency">Parallel tables</Label>
-              <Input
-                id="concurrency"
-                name="foreachConcurrency"
-                type="number"
-                min="1"
-                max="100"
-                defaultValue="4"
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="pipeline-id">CDC pipeline ID (optional)</Label>
-              <Input id="pipeline-id" name="cdcPipelineId" placeholder="Adds the CDC task when provided" />
-            </div>
-          </div>
+          <Tabs defaultValue="job" className="w-full">
+            <TabsList className="grid w-full grid-cols-2">
+              <TabsTrigger value="job">Job configuration</TabsTrigger>
+              <TabsTrigger value="source">Git source &amp; execution</TabsTrigger>
+            </TabsList>
+            <TabsContent value="job" forceMount className="mt-4 space-y-4 data-[state=inactive]:hidden">
+              <div className="space-y-2">
+                <Label htmlFor="ingestion-group">Ingestion group</Label>
+                {groupsLoading ? (
+                  <Skeleton className="h-10" />
+                ) : groups.length ? (
+                  <Select value={ingestionGroup} onValueChange={setIngestionGroup}>
+                    <SelectTrigger id="ingestion-group" className="w-full">
+                      <SelectValue placeholder="Select an ingestion group" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {groups.map((group) => (
+                        <SelectItem key={group.ingestion_group} value={group.ingestion_group}>
+                          {group.ingestion_group} · {group.enabled_source_count} enabled sources
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Empty>
+                    <EmptyHeader>
+                      <EmptyTitle>No ingestion groups found</EmptyTitle>
+                      <EmptyDescription>Add a row to the configuration table before creating a job.</EmptyDescription>
+                    </EmptyHeader>
+                  </Empty>
+                )}
+              </div>
+              {selectedGroup && (
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardTitle className="text-base">Generated job</CardTitle>
+                    <CardDescription>
+                      [{selectedGroup.ingestion_group}] Ingestion Pipeline · {selectedGroup.source_count} configured sources
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="grid gap-1 text-sm text-muted-foreground md:grid-cols-2">
+                    <div>configuration_fqn: {fqn(location, 'jdbc_ingestion_config')}</div>
+                    <div>watermark_fqn: {fqn(location, 'jdbc_ingestion_watermark')}</div>
+                    <div>ingestion_group: {selectedGroup.ingestion_group}</div>
+                  </CardContent>
+                </Card>
+              )}
+            </TabsContent>
+            <TabsContent value="source" forceMount className="mt-4 data-[state=inactive]:hidden">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2 md:col-span-2">
+                  <Label htmlFor="git-url">GitHub repository URL</Label>
+                  <Input
+                    id="git-url"
+                    name="gitUrl"
+                    type="url"
+                    defaultValue="https://github.com/erinaldidb/watersync"
+                    placeholder="https://github.com/organization/repository"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="git-branch">Branch</Label>
+                  <Input id="git-branch" name="gitBranch" defaultValue="main" placeholder="main" />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="concurrency">Parallel tables</Label>
+                  <Input
+                    id="concurrency"
+                    name="foreachConcurrency"
+                    type="number"
+                    min="1"
+                    max="100"
+                    defaultValue="4"
+                    required
+                  />
+                </div>
+                <div className="space-y-2 md:col-span-2">
+                  <Label htmlFor="pipeline-id">CDC pipeline ID (optional)</Label>
+                  <Input id="pipeline-id" name="cdcPipelineId" placeholder="Adds the CDC task when provided" />
+                </div>
+              </div>
+            </TabsContent>
+          </Tabs>
           <p className="text-xs text-muted-foreground">
             If a job with the generated name already exists, its definition is updated in place.
           </p>

@@ -13,13 +13,19 @@ test('configuration screen exposes lookup and create actions', async ({ page }) 
   await page.goto('/config');
   await expect(page.getByRole('heading', { name: 'Ingestion configuration' })).toBeVisible();
   await expect(page.getByLabel('Filter configurations')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Add entry' })).toBeVisible();
+  await page.getByRole('button', { name: 'Add entry' }).click();
+  await expect(page.getByRole('heading', { name: 'Add configuration' })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Source mapping' })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Incremental settings' })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Connection & runtime' })).toBeVisible();
 });
 
 test('jobs screen exposes the guided creation form', async ({ page }) => {
   await page.goto('/jobs');
   await page.getByRole('button', { name: 'Create job' }).click();
   await expect(page.getByRole('heading', { name: 'Create or update a WaterSync job' })).toBeVisible();
-  await expect(page.getByLabel('Planner notebook')).toBeVisible();
-  await expect(page.getByLabel('Worker notebook')).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Job configuration' })).toBeVisible();
+  await page.getByRole('tab', { name: 'Git source & execution' }).click();
+  await expect(page.getByLabel('GitHub repository URL')).toBeVisible();
+  await expect(page.getByLabel('Branch')).toBeVisible();
 });
