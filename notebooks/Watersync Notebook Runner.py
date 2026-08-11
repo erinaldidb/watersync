@@ -93,6 +93,8 @@ dbutils.widgets.text(
     "CDC pipeline bootstrap file path",
 )
 dbutils.widgets.text("foreach_concurrency", "4", "ForEach concurrency")
+dbutils.widgets.text("git_url", "https://github.com/erinaldidb/watersync", "Git repo URL for job tasks")
+dbutils.widgets.text("git_branch", "main", "Git branch for job tasks")
 
 dbutils.widgets.text("project_id", "jdbc-test", "Lakebase project id")
 dbutils.widgets.text("project_display_name", "JDBC Test DB", "Lakebase project display name")
@@ -167,16 +169,21 @@ elif action == "create_job":
     if not runtime.ingestion_group:
         raise ValueError("ingestion_group is required for create_job")
 
+    git_url = _widget("git_url") or "https://github.com/erinaldidb/watersync"
+    git_branch = _widget("git_branch") or "main"
+
     job_settings = JobProvisioningSettings(
         ingestion_group=runtime.ingestion_group,
         configuration_fqn=runtime.configuration_fqn,
         watermark_fqn=runtime.watermark_fqn,
-        planner_notebook_path=str(project_root / "notebooks" / "Task - Plan Configs.py"),
-        worker_notebook_path=str(project_root / "notebooks" / "Task - Run Ingestion.py"),
+        planner_notebook_path="notebooks/Task - Plan Configs",
+        worker_notebook_path="notebooks/Task - Run Ingestion",
         wheel_uri=wheel_uri,
         cdc_pipeline_id=_widget("cdc_pipeline_id"),
         cdc_pipeline_file_path=_widget("cdc_pipeline_file_path"),
         foreach_concurrency=int(_widget("foreach_concurrency") or "4"),
+        git_url=git_url,
+        git_branch=git_branch,
     )
     result = IngestionJobProvisioner().create_or_update_job(job_settings)
     print(json.dumps(result, indent=2))
@@ -322,4 +329,4 @@ display(
 # COMMAND ----------
 
 # MAGIC %sh
-# MAGIC cp "/Workspace/Users/emanuele.rinaldi@databricks.com/EPIC CLARITY - JDBC + Watermark/watersync/dist/watersync-0.1.1-py3-none-any.whl" /Volumes/serverless_pixels_release_catalog/slalom/sample
+# MAGIC cp "/Workspace/Users/emanuele.rinaldi@databricks.com/EPIC CLARITY - JDBC + Watermark/watersync/dist/watersync-0.1.1-py3-none-any.whl" /Volumes/serverless_pixels_release_catalog/slalom/sample/watersync-0.1.1-py3-none-any.whl

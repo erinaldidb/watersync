@@ -106,3 +106,5 @@ class JobProvisioningSettings:
     cdc_pipeline_id: str = ""
     cdc_pipeline_file_path: str = ""
     use_serverless: bool = True
+    git_url: str = ""
+    git_branch: str = "main"

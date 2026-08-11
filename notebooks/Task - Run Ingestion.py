@@ -1,4 +1,10 @@
 # Databricks notebook source
+# DBTITLE 1,Install watersync from repo root
+# MAGIC %pip install ../. --quiet
+# MAGIC dbutils.library.restartPython()
+
+# COMMAND ----------
+
 # DBTITLE 1,Run ingestion for one table
 import json
 from pyspark.sql import SparkSession
@@ -19,4 +25,5 @@ result = orchestrator.run_selected_ingestion()
 print(json.dumps(result, default=str))
 
 # COMMAND ----------
+
 
