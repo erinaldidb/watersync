@@ -33,13 +33,22 @@ class UnityCatalogSetup:
             CREATE TABLE IF NOT EXISTS IDENTIFIER('{self.config_table}') (
               ingestion_group STRING COMMENT 'Logical group processed by the same Lakeflow Job',
               source_table_name STRING COMMENT 'Fully qualified source table name',
-              target_table_name STRING COMMENT 'Target staging table name',
+              staging_table_fqn STRING COMMENT 'Staging table in catalog.schema.table format',
+              target_table_fqn STRING COMMENT 'Final destination in catalog.schema.table format',
               ingestion_type STRING COMMENT 'full or incremental',
               key_columns STRING COMMENT 'Comma-separated business keys',
               watermark_column STRING COMMENT 'Timestamp or change-sequence column used by ingestion',
               partition_column STRING COMMENT 'Numeric JDBC partition column',
               predicate_column STRING COMMENT 'String JDBC predicate-partition column',
               epic_csa_enabled BOOLEAN COMMENT 'True when EPIC CSA mode is enabled',
+              jdbc_url STRING COMMENT 'JDBC URL; leave empty when using a UC connection',
+              jdbc_user STRING COMMENT 'JDBC username',
+              jdbc_secret_scope STRING COMMENT 'Secret scope containing the JDBC password',
+              jdbc_secret_key STRING COMMENT 'Secret key containing the JDBC password',
+              connection_name STRING COMMENT 'Unity Catalog connection used instead of jdbc_url',
+              watermark_threshold_minutes INT COMMENT 'Delay behind current time for incremental cutoffs',
+              fetch_size INT COMMENT 'JDBC fetch size',
+              num_partitions INT COMMENT 'JDBC parallelism',
               update_dttm TIMESTAMP COMMENT 'Last update timestamp for the config row',
               enabled BOOLEAN COMMENT 'True when the config row is active'
             )
@@ -48,6 +57,21 @@ class UnityCatalogSetup:
             COMMENT 'Configuration table for grouped JDBC ingestion jobs'
             TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true')
         """)
+        existing = {field.name for field in self.spark.table(self.config_table).schema.fields}
+        additions = {
+            "target_table_fqn": "STRING COMMENT 'Final destination in catalog.schema.table format'",
+            "jdbc_url": "STRING COMMENT 'JDBC URL; leave empty when using a UC connection'",
+            "jdbc_user": "STRING COMMENT 'JDBC username'",
+            "jdbc_secret_scope": "STRING COMMENT 'Secret scope containing the JDBC password'",
+            "jdbc_secret_key": "STRING COMMENT 'Secret key containing the JDBC password'",
+            "connection_name": "STRING COMMENT 'Unity Catalog connection used instead of jdbc_url'",
+            "watermark_threshold_minutes": "INT COMMENT 'Delay behind current time for incremental cutoffs'",
+            "fetch_size": "INT COMMENT 'JDBC fetch size'",
+            "num_partitions": "INT COMMENT 'JDBC parallelism'",
+        }
+        missing = [f"{name} {ddl}" for name, ddl in additions.items() if name not in existing]
+        if missing:
+            self.spark.sql(f"ALTER TABLE IDENTIFIER('{self.config_table}') ADD COLUMNS ({', '.join(missing)})")
 
     def create_log_table(self) -> None:
         self.spark.sql(f"""
@@ -66,7 +90,7 @@ class UnityCatalogSetup:
             CREATE OR REPLACE TABLE IDENTIFIER('{self.state_table}') (
               ingestion_group STRING COMMENT 'Matches ingestion_group in config',
               source_table_name STRING COMMENT 'Matches source_table_name in config',
-              target_table_name STRING COMMENT 'Matches target_table_name in config',
+              staging_table_fqn STRING COMMENT 'Matches staging_table_fqn in config',
               ingestion_type STRING COMMENT 'Matches ingestion_type in config',
               last_watermark STRING COMMENT 'Stored watermark value',
               last_run_timestamp TIMESTAMP COMMENT 'Timestamp of the last run',

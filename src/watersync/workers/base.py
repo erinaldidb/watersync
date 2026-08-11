@@ -19,7 +19,8 @@ class JdbcIngestionWorker(ABC):
         self.spark = spark
         self.runtime = runtime
         self.config = config
-        self.staging_table_fqn = f"{runtime.catalog}.{runtime.schema}.{config.target_table_name}"
+        self.staging_table_fqn = config.staging_table_fqn
+        self.write_table_fqn = config.target_table_fqn if config.ingestion_type == "full" else self.staging_table_fqn
 
     def process(self) -> dict[str, Any]:
         _ctx = {
@@ -64,7 +65,7 @@ class JdbcIngestionWorker(ABC):
         payload = {
             "group": self.config.ingestion_group,
             "table": self.config.source_table_name,
-            "target": self.staging_table_fqn,
+            "target": self.write_table_fqn,
             "ingestion_type": self.config.ingestion_type,
             "status": status,
         }
@@ -99,12 +100,14 @@ class JdbcIngestionWorker(ABC):
         reader = (
             self.spark.read.format("jdbc")
             .option("dbtable", dbtable)
-            .options(**self.runtime.jdbc_properties)
+            .options(**self.config.jdbc_properties)
         )
-        if self.runtime.jdbc_url:
-            reader = reader.option("url", self.runtime.jdbc_url)
+        if self.config.jdbc_url:
+            reader = reader.option("url", self.config.jdbc_url)
         else:
-            reader = reader.option("databricks.connection", self.runtime.connection_name)
+            if not self.config.connection_name:
+                raise ValueError("Either jdbc_url or connection_name is required in the configuration row")
+            reader = reader.option("databricks.connection", self.config.connection_name)
 
         if (
             partition_column
@@ -116,18 +119,18 @@ class JdbcIngestionWorker(ABC):
                 reader.option("partitionColumn", partition_column)
                 .option("lowerBound", lower_bound)
                 .option("upperBound", upper_bound)
-                .option("numPartitions", self.runtime.num_partitions)
+                .option("numPartitions", self.config.num_partitions)
             )
         return reader
 
     def build_jdbc_reader_with_predicates(self, dbtable: str, predicates: list[str]):
-        if not self.runtime.jdbc_url:
-            raise ValueError("Predicate-based parallel reads require runtime.jdbc_url")
+        if not self.config.jdbc_url:
+            raise ValueError("Predicate-based parallel reads require config.jdbc_url")
         return self.spark.read.jdbc(
-            url=self.runtime.jdbc_url,
+            url=self.config.jdbc_url,
             table=dbtable,
             predicates=predicates,
-            properties=self.runtime.jdbc_properties,
+            properties=self.config.jdbc_properties,
         )
 
     def get_last_watermark(self) -> str:
@@ -137,7 +140,7 @@ class JdbcIngestionWorker(ABC):
             FROM {self.runtime.state_table}
             WHERE ingestion_group = '{quote_sql_string(self.config.ingestion_group)}'
               AND source_table_name = '{quote_sql_string(self.config.source_table_name)}'
-              AND target_table_name = '{quote_sql_string(self.config.target_table_name)}'
+              AND staging_table_fqn = '{quote_sql_string(self.config.staging_table_fqn)}'
               AND ingestion_type = '{quote_sql_string(self.config.ingestion_type)}'
               AND last_watermark IS NOT NULL
             ORDER BY last_run_timestamp DESC
@@ -209,7 +212,7 @@ class JdbcIngestionWorker(ABC):
         bounds_query = (
             f"(SELECT MIN({self.config.predicate_column}) AS boundary_val FROM ("
             f"SELECT {self.config.predicate_column}, "
-            f"NTILE({self.runtime.num_partitions}) OVER (ORDER BY {self.config.predicate_column}) AS bucket "
+            f"NTILE({self.config.num_partitions}) OVER (ORDER BY {self.config.predicate_column}) AS bucket "
             f"FROM {self.config.source_table_name} {where_clause}"
             f") sub WHERE bucket > 1 GROUP BY bucket) AS bounds"
         )
@@ -245,7 +248,7 @@ class JdbcIngestionWorker(ABC):
         if self.config.ingestion_type == "incremental":
             cutoff = (
                 datetime.now()
-                - timedelta(minutes=self.runtime.watermark_threshold_minutes)
+                - timedelta(minutes=self.config.watermark_threshold_minutes)
             ).strftime("%Y-%m-%d %H:%M:%S")
             source_query = (
                 f"(SELECT * FROM {self.config.source_table_name} "
@@ -284,11 +287,11 @@ class JdbcIngestionWorker(ABC):
         logger.info(
             "[WRITE]  %s → %s  mode=%s",
             self.config.source_table_name,
-            self.staging_table_fqn,
+            self.write_table_fqn,
             write_mode,
             extra=_ctx,
         )
-        df_with_metadata = (
+        df_with_metadata = df if self.config.ingestion_type == "full" else (
             df.withColumn("_ingested_at", F.current_timestamp())
             .withColumn("_source_table", F.lit(self.config.source_table_name))
             .withColumn("_ingestion_group", F.lit(self.config.ingestion_group))
@@ -299,22 +302,22 @@ class JdbcIngestionWorker(ABC):
             writer = writer.mode("overwrite").option("overwriteSchema", "true")
         else:
             writer = writer.mode("append").option("mergeSchema", "true")
-        writer.saveAsTable(self.staging_table_fqn)
+        writer.saveAsTable(self.write_table_fqn)
 
         max_watermark = None
         if self.config.watermark_column:
             max_watermark = (
-                self.spark.table(self.staging_table_fqn)
+                self.spark.table(self.write_table_fqn)
                 .select(F.max(F.col(self.config.watermark_column)).alias("max_wm"))
                 .first()["max_wm"]
             )
         logger.info(
             "[WRITE]  %s — staging write complete  max_watermark=%s",
-            self.staging_table_fqn,
+            self.write_table_fqn,
             max_watermark,
             extra=_ctx,
         )
-        return self.staging_table_fqn, max_watermark
+        return self.write_table_fqn, max_watermark
 
     def update_watermark_state(
         self,
@@ -340,7 +343,7 @@ class JdbcIngestionWorker(ABC):
                 (
                     self.config.ingestion_group,
                     self.config.source_table_name,
-                    self.config.target_table_name,
+                    self.config.staging_table_fqn,
                     self.config.ingestion_type,
                     str(max_watermark)[:19] if max_watermark is not None else None,
                     now,
@@ -350,7 +353,7 @@ class JdbcIngestionWorker(ABC):
             ],
             schema=(
                 "ingestion_group STRING, source_table_name STRING, "
-                "target_table_name STRING, ingestion_type STRING, "
+                "staging_table_fqn STRING, ingestion_type STRING, "
                 "last_watermark STRING, last_run_timestamp TIMESTAMP, "
                 "status STRING, last_error STRING"
             ),
@@ -364,7 +367,7 @@ class JdbcIngestionWorker(ABC):
                     [
                         "target.ingestion_group = source.ingestion_group",
                         "target.source_table_name = source.source_table_name",
-                        "target.target_table_name = source.target_table_name",
+                        "target.staging_table_fqn = source.staging_table_fqn",
                         "target.ingestion_type = source.ingestion_type",
                     ]
                 ),

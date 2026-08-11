@@ -5,6 +5,8 @@ from databricks.sdk.service import pipelines as pl
 from databricks.sdk.service.compute import AutoScale, ClusterSpec, DataSecurityMode, Environment, Library
 from databricks.sdk.service.jobs import (
     ForEachTask,
+    GitProvider,
+    GitSource,
     JobCluster,
     JobEnvironment,
     JobParameterDefinition,
@@ -25,6 +27,7 @@ class IngestionJobProvisioner:
 
     def ensure_pipeline(self, settings: JobProvisioningSettings) -> str:
         if settings.cdc_pipeline_id:
+            self._sync_pipeline_env(settings.cdc_pipeline_id, settings)
             return settings.cdc_pipeline_id
         if not settings.cdc_pipeline_file_path:
             raise ValueError("cdc_pipeline_file_path is required when cdc_pipeline_id is not provided")
@@ -37,15 +40,17 @@ class IngestionJobProvisioner:
             if pipeline.name == pipeline_name
         ]
         if existing:
+            self._sync_pipeline_env(existing[0].pipeline_id, settings)
             return existing[0].pipeline_id
 
+        config_catalog, config_schema, _ = settings.configuration_fqn.split(".", 2)
         created = self.w.pipelines.create(
             name=pipeline_name,
-            catalog=settings.catalog,
-            target=settings.schema,
+            catalog=config_catalog,
+            target=config_schema,
             configuration={
-                "pipeline.catalog": settings.catalog,
-                "pipeline.schema": settings.schema,
+                "pipeline.configuration_fqn": settings.configuration_fqn,
+                "pipeline.watermark_fqn": settings.watermark_fqn,
                 "pipeline.ingestion_group": settings.ingestion_group,
             },
             libraries=[pl.PipelineLibrary(file=pl.FileLibrary(path=settings.cdc_pipeline_file_path))],
@@ -55,7 +60,38 @@ class IngestionJobProvisioner:
         )
         return created.pipeline_id
 
+    def _sync_pipeline_env(self, pipeline_id: str, settings: JobProvisioningSettings) -> None:
+        """Reconcile pipeline config so it uses the Volume-hosted wheel."""
+        pipe = self.w.pipelines.get(pipeline_id=pipeline_id)
+        spec = pipe.spec
+        # Mirror the same create() arguments but via update() on the existing pipeline
+        self.w.pipelines.update(
+            pipeline_id=pipeline_id,
+            name=pipe.name,
+            catalog=spec.catalog,
+            target=spec.target,
+            configuration=spec.configuration,
+            libraries=[pl.PipelineLibrary(file=pl.FileLibrary(path=settings.cdc_pipeline_file_path))],
+            environment=pl.PipelinesEnvironment(dependencies=[settings.wheel_uri]),
+            serverless=spec.serverless,
+            channel=spec.channel,
+        )
+
     def build_job_settings(self, settings: JobProvisioningSettings, pipeline_id: str) -> JobSettings:
+        # Determine source type based on whether a Git URL is configured
+        use_git = bool(settings.git_url)
+        source = Source.GIT if use_git else Source.WORKSPACE
+
+        git_source = (
+            GitSource(
+                git_url=settings.git_url,
+                git_provider=GitProvider.GIT_HUB,
+                git_branch=settings.git_branch,
+            )
+            if use_git
+            else None
+        )
+
         env_key = "Default"
         environments = [
             JobEnvironment(
@@ -69,7 +105,7 @@ class IngestionJobProvisioner:
             description="Build one For each item per enabled source table.",
             notebook_task=NotebookTask(
                 notebook_path=settings.planner_notebook_path,
-                source=Source.WORKSPACE,
+                source=source,
             ),
             environment_key=env_key,
         )
@@ -81,7 +117,7 @@ class IngestionJobProvisioner:
                 base_parameters={
                     "source_table_name": "{{input.source_table_name}}",
                 },
-                source=Source.WORKSPACE,
+                source=source,
             ),
             environment_key=env_key,
         )
@@ -108,19 +144,13 @@ class IngestionJobProvisioner:
             name=f"[{settings.ingestion_group}] Ingestion Pipeline",
             parameters=[
                 JobParameterDefinition(name="ingestion_group", default=settings.ingestion_group),
-                JobParameterDefinition(name="catalog", default=settings.catalog),
-                JobParameterDefinition(name="schema", default=settings.schema),
-                JobParameterDefinition(name="jdbc_url", default=settings.jdbc_url),
-                JobParameterDefinition(name="jdbc_user", default=settings.jdbc_user),
-                JobParameterDefinition(name="jdbc_secret_scope", default=settings.jdbc_secret_scope),
-                JobParameterDefinition(name="jdbc_secret_key", default=settings.jdbc_secret_key),
-                JobParameterDefinition(name="watermark_threshold_minutes", default=settings.watermark_threshold_minutes),
-                JobParameterDefinition(name="fetch_size", default=settings.fetch_size),
-                JobParameterDefinition(name="num_partitions", default=settings.num_partitions),
+                JobParameterDefinition(name="configuration_fqn", default=settings.configuration_fqn),
+                JobParameterDefinition(name="watermark_fqn", default=settings.watermark_fqn),
             ],
             tasks=[planner_task, ingestion_worker, cdc_task],
             max_concurrent_runs=1,
             environments=environments,
+            git_source=git_source,
         )
 
     def create_or_update_job(self, settings: JobProvisioningSettings) -> dict[str, str | int]:
@@ -137,6 +167,7 @@ class IngestionJobProvisioner:
                 tasks=job_settings.tasks,
                 max_concurrent_runs=job_settings.max_concurrent_runs,
                 environments=job_settings.environments,
+                git_source=job_settings.git_source,
             )
             job_id = result.job_id
         return {

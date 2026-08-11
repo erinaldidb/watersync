@@ -1,0 +1,39 @@
+bundle:
+  name: watersync-control-plane
+
+include:
+  - resources/watersync_app.yml
+
+sync:
+  include:
+    - app/**
+  exclude:
+    - app/**/node_modules/**
+    - app/**/.env
+    - app/**/.databricks/**
+
+variables:
+  app_name:
+    description: Display name for the Watersync control-plane app
+    default: watersync-control-plane
+  warehouse_id:
+    description: SQL Warehouse used for metadata reads and writes
+    default: "09ef614b7aec3eea"
+  default_catalog:
+    description: Default Unity Catalog catalog containing Watersync metadata
+    default: serverless_pixels_release_catalog
+  default_schema:
+    description: Default Unity Catalog schema containing Watersync metadata
+    default: jdbc_incremental_gh
+
+targets:
+  dev:
+    mode: development
+    default: true
+    variables:
+      app_name: watersync-control-plane-dev
+
+  prod:
+    mode: production
+    variables:
+      app_name: watersync-control-plane

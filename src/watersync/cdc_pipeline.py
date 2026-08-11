@@ -4,23 +4,22 @@ from typing import Any
 
 from pyspark.sql.functions import col
 
-from watersync.common import quote_sql_string, row_to_dict
+from watersync.common import quote_sql_string, resolve_staging_table_fqn, row_to_dict
 
 _METADATA_COLUMNS = ["_ingested_at", "_source_table", "_ingestion_group", "_ingestion_type"]
 _CSA_CONTROL_COLUMNS = ["_IS_DELETED", "_csa_update_dt"]
 
 
 class CdcScd2PipelineBuilder:
-    def __init__(self, spark: Any, dp_module: Any, catalog: str, schema: str, ingestion_group: str = ""):
+    def __init__(self, spark: Any, dp_module: Any, configuration_fqn: str, ingestion_group: str = ""):
         self.spark = spark
         self.dp = dp_module
-        self.catalog = catalog
-        self.schema = schema
+        self.configuration_fqn = configuration_fqn
         self.ingestion_group = ingestion_group
 
     @property
     def config_table(self) -> str:
-        return f"{self.catalog}.{self.schema}.jdbc_ingestion_config"
+        return self.configuration_fqn
 
     def load_configs(self) -> list[dict[str, Any]]:
         filters = ["enabled = true"]
@@ -67,7 +66,7 @@ class CdcScd2PipelineBuilder:
             except_column_list=_METADATA_COLUMNS,
         )
 
-    def register_incremental_csa_flow(self, history_table: str, staging_table: str, staging_fqn: str, key_columns: list[str]) -> None:
+    def register_incremental_csa_flow(self, history_table: str, flow_prefix: str, staging_table: str, staging_fqn: str, key_columns: list[str]) -> None:
         @self.dp.view(
             name=f"v_{staging_table}_upserts",
             comment=f"Upsert events (_IS_DELETED=0 or NULL full-load rows) from {staging_fqn}",
@@ -76,7 +75,7 @@ class CdcScd2PipelineBuilder:
             return self.spark.readStream.table(_tbl).filter("_IS_DELETED IS NOT TRUE")
 
         self.dp.create_auto_cdc_flow(
-            name=f"{history_table}_upserts",
+            name=f"{flow_prefix}_upserts",
             target=history_table,
             source=f"v_{staging_table}_upserts",
             keys=key_columns,
@@ -85,8 +84,8 @@ class CdcScd2PipelineBuilder:
             except_column_list=_METADATA_COLUMNS + _CSA_CONTROL_COLUMNS,
         )
 
-        history_fqn = f"{self.catalog}.{self.schema}.{history_table}"
-        sink_name = f"{history_table}_delete_sink"
+        history_fqn = history_table
+        sink_name = f"{flow_prefix}_delete_sink"
 
         @self.dp.foreach_batch_sink(name=sink_name)
         def _delete_sink(batch_df, batch_id, _hist=history_fqn, _keys=list(key_columns)):
@@ -103,7 +102,7 @@ class CdcScd2PipelineBuilder:
                 WHEN MATCHED THEN UPDATE SET h.__END_AT = d._csa_update_dt
             """)
 
-        @self.dp.update_flow(target=sink_name, name=f"{history_table}_close_deletes")
+        @self.dp.update_flow(target=sink_name, name=f"{flow_prefix}_close_deletes")
         def _close_deletes_flow(_tbl=staging_fqn, _keys=list(key_columns)):
             return self.spark.readStream.table(_tbl).filter("_IS_DELETED IS TRUE").select(*_keys, "_csa_update_dt")
 
@@ -116,15 +115,23 @@ class CdcScd2PipelineBuilder:
         )
 
     def build(self) -> None:
+        config_catalog, config_schema, _ = self.configuration_fqn.split(".", 2)
         for config in self.load_configs():
             source_table = config["source_table_name"]
-            staging_table = config["target_table_name"]
+            staging_fqn = resolve_staging_table_fqn(
+                config.get("staging_table_fqn"), source_table, config_catalog, config_schema
+            )
+            staging_table = staging_fqn.split(".")[-1]
             key_columns = [key.strip() for key in (config["key_columns"] or "").split(",") if key.strip()]
             watermark_column = (config["watermark_column"] or "").strip()
             ingestion_type = (config["ingestion_type"] or "incremental").strip().lower()
+            if ingestion_type == "full":
+                continue
             epic_csa_enabled = bool(config["epic_csa_enabled"])
-            staging_fqn = f"{self.catalog}.{self.schema}.{staging_table}"
-            history_table = f"{source_table.split('.')[-1]}_history"
+            history_table = (config.get("target_table_fqn") or "").strip()
+            if len(history_table.split(".")) != 3:
+                raise ValueError(f"target_table_fqn must use catalog.schema.table for {source_table}")
+            flow_prefix = "_".join(history_table.split("."))
 
             self.dp.create_streaming_table(
                 name=history_table,
@@ -137,19 +144,16 @@ class CdcScd2PipelineBuilder:
 
             if ingestion_type == "incremental":
                 if epic_csa_enabled:
-                    self.register_incremental_csa_flow(history_table, staging_table, staging_fqn, key_columns)
+                    self.register_incremental_csa_flow(history_table, flow_prefix, staging_table, staging_fqn, key_columns)
                 else:
                     self.register_incremental_standard_flow(history_table, staging_table, staging_fqn, key_columns, watermark_column)
-            else:
-                self.register_snapshot_flow(history_table, staging_fqn, key_columns)
 
 
 def build_pipeline_from_spark_conf(spark: Any, dp_module: Any) -> None:
     builder = CdcScd2PipelineBuilder(
         spark=spark,
         dp_module=dp_module,
-        catalog=spark.conf.get("pipeline.catalog", "users"),
-        schema=spark.conf.get("pipeline.schema", "default"),
+        configuration_fqn=spark.conf.get("pipeline.configuration_fqn"),
         ingestion_group=spark.conf.get("pipeline.ingestion_group", ""),
     )
     builder.build()
