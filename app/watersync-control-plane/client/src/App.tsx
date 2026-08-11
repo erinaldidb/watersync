@@ -1065,7 +1065,7 @@ function JobDialog({
   };
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="w-[calc(100vw-2rem)] max-w-4xl">
+      <DialogContent className="w-[calc(100vw-2rem)] sm:max-w-5xl">
         <DialogHeader>
           <DialogTitle>Create or update a WaterSync job</DialogTitle>
           <DialogDescription>
@@ -1115,10 +1115,25 @@ function JobDialog({
                       [{selectedGroup.ingestion_group}] Ingestion Pipeline · {selectedGroup.source_count} configured sources
                     </CardDescription>
                   </CardHeader>
-                  <CardContent className="grid gap-1 text-sm text-muted-foreground md:grid-cols-2">
-                    <div>configuration_fqn: {fqn(location, 'jdbc_ingestion_config')}</div>
-                    <div>watermark_fqn: {fqn(location, 'jdbc_ingestion_watermark')}</div>
-                    <div>ingestion_group: {selectedGroup.ingestion_group}</div>
+                  <CardContent className="grid gap-4 text-sm text-muted-foreground md:grid-cols-2">
+                    <div className="min-w-0 space-y-1">
+                      <div>configuration_fqn</div>
+                      <div className="break-all font-mono text-xs text-foreground">
+                        {fqn(location, 'jdbc_ingestion_config')}
+                      </div>
+                    </div>
+                    <div className="min-w-0 space-y-1">
+                      <div>watermark_fqn</div>
+                      <div className="break-all font-mono text-xs text-foreground">
+                        {fqn(location, 'jdbc_ingestion_watermark')}
+                      </div>
+                    </div>
+                    <div className="min-w-0 space-y-1">
+                      <div>ingestion_group</div>
+                      <div className="break-all font-mono text-xs text-foreground">
+                        {selectedGroup.ingestion_group}
+                      </div>
+                    </div>
                   </CardContent>
                 </Card>
               )}
