@@ -22,7 +22,7 @@ class EpicCsaIngestionWorker(JdbcIngestionWorker):
             FROM {self.runtime.state_table}
             WHERE ingestion_group = '{quote_sql_string(self.config.ingestion_group)}'
               AND source_table_name = '{quote_sql_string(self.config.source_table_name)}'
-              AND target_table_name = '{quote_sql_string(self.config.target_table_name)}'
+              AND target_table_name = '{quote_sql_string(self.config.target_table_fqn)}'
               AND ingestion_type = '{quote_sql_string(self.config.ingestion_type)}'
               AND last_watermark IS NOT NULL
             ORDER BY last_run_timestamp DESC
@@ -74,7 +74,7 @@ class EpicCsaIngestionWorker(JdbcIngestionWorker):
         bounds_query = (
             f"(SELECT MIN({self.config.predicate_column}) AS boundary_val FROM ("
             f"SELECT main.{self.config.predicate_column}, "
-            f"NTILE({self.runtime.num_partitions}) OVER "
+            f"NTILE({self.config.num_partitions}) OVER "
             f"(ORDER BY main.{self.config.predicate_column}) AS bucket "
             f"FROM {self.derive_csa_table_name()} csa "
             f"LEFT JOIN {self.config.source_table_name} main ON {join_condition} "

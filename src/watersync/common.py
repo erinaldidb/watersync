@@ -28,6 +28,14 @@ def resolve_target_table_name(raw_target_table_name: str | None, source_table_na
     return configured_name or default_target_table_name(source_table_name)
 
 
+def validate_table_fqn(value: str, field_name: str = "target_table_fqn") -> str:
+    normalized = normalize_text(value)
+    parts = normalized.split(".")
+    if len(parts) != 3 or any(not part.strip() for part in parts):
+        raise ValueError(f"{field_name} must use catalog.schema.table format; got '{value}'")
+    return normalized
+
+
 def row_to_dict(row: Any) -> dict[str, Any]:
     if hasattr(row, "asDict"):
         return row.asDict(recursive=True)

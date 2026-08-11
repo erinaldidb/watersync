@@ -31,45 +31,21 @@ def _configure_default_logging() -> None:
 
 @dataclass(frozen=True)
 class JdbcRuntimeSettings:
-    catalog: str
-    schema: str
+    configuration_fqn: str
+    watermark_fqn: str
     ingestion_group: str = ""
     source_table_name: str = ""
-    jdbc_url: str = ""
-    jdbc_user: str = ""
-    jdbc_password: str = ""
-    jdbc_secret_scope: str = ""
-    jdbc_secret_key: str = ""
-    watermark_threshold_minutes: int = 5
-    fetch_size: int = 10000
-    num_partitions: int = 8
-    connection_name: str = "slalom_jdbc_conn"
 
     def __post_init__(self) -> None:
         _configure_default_logging()
 
     @property
     def config_table(self) -> str:
-        return f"{self.catalog}.{self.schema}.jdbc_ingestion_config"
+        return self.configuration_fqn
 
     @property
     def state_table(self) -> str:
-        return f"{self.catalog}.{self.schema}.jdbc_ingestion_watermark"
-
-    @property
-    def jdbc_properties(self) -> dict[str, str]:
-        properties = {"fetchsize": str(self.fetch_size)}
-        if self.jdbc_user:
-            properties["user"] = self.jdbc_user
-        if self.jdbc_password:
-            properties["password"] = self.jdbc_password
-        elif self.jdbc_secret_scope and self.jdbc_secret_key:
-            from databricks.sdk.runtime import dbutils
-
-            properties["password"] = dbutils.secrets.get(
-                scope=self.jdbc_secret_scope, key=self.jdbc_secret_key
-            )
-        return properties
+        return self.watermark_fqn
 
 
 @dataclass(frozen=True)
@@ -77,16 +53,38 @@ class IngestionConfig:
     ingestion_group: str
     source_table_name: str
     target_table_name: str
+    target_table_fqn: str
     ingestion_type: str
     key_columns: str | None
     watermark_column: str
     partition_column: str
     predicate_column: str
     epic_csa_enabled: bool = False
+    jdbc_url: str = ""
+    jdbc_user: str = ""
+    jdbc_secret_scope: str = ""
+    jdbc_secret_key: str = ""
+    connection_name: str = ""
+    watermark_threshold_minutes: int = 5
+    fetch_size: int = 10000
+    num_partitions: int = 8
 
     @property
     def key_column_list(self) -> list[str]:
         return [key.strip() for key in (self.key_columns or "").split(",") if key.strip()]
+
+    @property
+    def jdbc_properties(self) -> dict[str, str]:
+        properties = {"fetchsize": str(self.fetch_size)}
+        if self.jdbc_user:
+            properties["user"] = self.jdbc_user
+        if self.jdbc_secret_scope and self.jdbc_secret_key:
+            from databricks.sdk.runtime import dbutils
+
+            properties["password"] = dbutils.secrets.get(
+                scope=self.jdbc_secret_scope, key=self.jdbc_secret_key
+            )
+        return properties
 
 
 @dataclass
@@ -99,19 +97,12 @@ class ReadResult:
 @dataclass(frozen=True)
 class JobProvisioningSettings:
     ingestion_group: str
-    catalog: str
-    schema: str
+    configuration_fqn: str
+    watermark_fqn: str
     planner_notebook_path: str
     worker_notebook_path: str
     wheel_uri: str
     foreach_concurrency: int = 4
-    jdbc_url: str = ""
-    jdbc_user: str = ""
-    jdbc_secret_scope: str = ""
-    jdbc_secret_key: str = ""
-    watermark_threshold_minutes: str = "5"
-    fetch_size: str = "10000"
-    num_partitions: str = "8"
     cdc_pipeline_id: str = ""
     cdc_pipeline_file_path: str = ""
     use_serverless: bool = True

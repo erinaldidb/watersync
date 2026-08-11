@@ -39,13 +39,14 @@ class IngestionJobProvisioner:
         if existing:
             return existing[0].pipeline_id
 
+        config_catalog, config_schema, _ = settings.configuration_fqn.split(".", 2)
         created = self.w.pipelines.create(
             name=pipeline_name,
-            catalog=settings.catalog,
-            target=settings.schema,
+            catalog=config_catalog,
+            target=config_schema,
             configuration={
-                "pipeline.catalog": settings.catalog,
-                "pipeline.schema": settings.schema,
+                "pipeline.configuration_fqn": settings.configuration_fqn,
+                "pipeline.watermark_fqn": settings.watermark_fqn,
                 "pipeline.ingestion_group": settings.ingestion_group,
             },
             libraries=[pl.PipelineLibrary(file=pl.FileLibrary(path=settings.cdc_pipeline_file_path))],
@@ -108,15 +109,8 @@ class IngestionJobProvisioner:
             name=f"[{settings.ingestion_group}] Ingestion Pipeline",
             parameters=[
                 JobParameterDefinition(name="ingestion_group", default=settings.ingestion_group),
-                JobParameterDefinition(name="catalog", default=settings.catalog),
-                JobParameterDefinition(name="schema", default=settings.schema),
-                JobParameterDefinition(name="jdbc_url", default=settings.jdbc_url),
-                JobParameterDefinition(name="jdbc_user", default=settings.jdbc_user),
-                JobParameterDefinition(name="jdbc_secret_scope", default=settings.jdbc_secret_scope),
-                JobParameterDefinition(name="jdbc_secret_key", default=settings.jdbc_secret_key),
-                JobParameterDefinition(name="watermark_threshold_minutes", default=settings.watermark_threshold_minutes),
-                JobParameterDefinition(name="fetch_size", default=settings.fetch_size),
-                JobParameterDefinition(name="num_partitions", default=settings.num_partitions),
+                JobParameterDefinition(name="configuration_fqn", default=settings.configuration_fqn),
+                JobParameterDefinition(name="watermark_fqn", default=settings.watermark_fqn),
             ],
             tasks=[planner_task, ingestion_worker, cdc_task],
             max_concurrent_runs=1,

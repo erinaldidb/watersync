@@ -22,9 +22,7 @@ class JdbcIngestionConfigRepository:
         query = f"""
             SELECT
                 ingestion_group,
-                source_table_name,
-                coalesce(target_table_name, concat('staging_', regexp_extract(source_table_name, '([^\\.]+)', 1))) AS target_table_name,
-                lower(coalesce(ingestion_type, 'incremental')) AS ingestion_type
+                source_table_name
             FROM {self.runtime.config_table}
             WHERE enabled = true
               AND ingestion_group = '{quote_sql_string(ingestion_group)}'

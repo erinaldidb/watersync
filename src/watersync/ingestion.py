@@ -9,6 +9,7 @@ from watersync.common import (
     quote_sql_string,
     resolve_target_table_name,
     row_to_dict,
+    validate_table_fqn,
 )
 from watersync.models import IngestionConfig, JdbcRuntimeSettings
 from watersync.workers import (
@@ -41,12 +42,15 @@ class JdbcIngestionConfigRepository:
                 ingestion_group,
                 source_table_name,
                 target_table_name,
+                target_table_fqn,
                 lower(coalesce(ingestion_type, 'incremental')) AS ingestion_type,
                 key_columns,
                 watermark_column,
                 partition_column,
                 predicate_column,
-                epic_csa_enabled
+                epic_csa_enabled,
+                jdbc_url, jdbc_user, jdbc_secret_scope, jdbc_secret_key,
+                connection_name, watermark_threshold_minutes, fetch_size, num_partitions
             FROM {self.runtime.config_table}
             WHERE {' AND '.join(filters)}
             ORDER BY ingestion_group, source_table_name
@@ -62,16 +66,33 @@ class JdbcIngestionConfigRepository:
                     row_dict.get("target_table_name"),
                     normalize_text(row_dict.get("source_table_name")),
                 ),
+                target_table_fqn=validate_table_fqn(row_dict.get("target_table_fqn") or ""),
                 ingestion_type=normalize_ingestion_type(row_dict.get("ingestion_type")),
                 key_columns=row_dict.get("key_columns"),
                 watermark_column=normalize_text(row_dict.get("watermark_column")),
                 partition_column=normalize_text(row_dict.get("partition_column")),
                 predicate_column=normalize_text(row_dict.get("predicate_column")),
                 epic_csa_enabled=bool(row_dict.get("epic_csa_enabled")),
+                jdbc_url=normalize_text(row_dict.get("jdbc_url")),
+                jdbc_user=normalize_text(row_dict.get("jdbc_user")),
+                jdbc_secret_scope=normalize_text(row_dict.get("jdbc_secret_scope")),
+                jdbc_secret_key=normalize_text(row_dict.get("jdbc_secret_key")),
+                connection_name=normalize_text(row_dict.get("connection_name")),
+                watermark_threshold_minutes=int(row_dict.get("watermark_threshold_minutes") or 5),
+                fetch_size=int(row_dict.get("fetch_size") or 10000),
+                num_partitions=int(row_dict.get("num_partitions") or 8),
             )
             if not config.ingestion_group:
                 raise ValueError(
                     f"Config row for {config.source_table_name} is missing ingestion_group"
+                )
+            if not config.jdbc_url and not config.connection_name:
+                raise ValueError(
+                    f"Config row for {config.source_table_name} requires jdbc_url or connection_name"
+                )
+            if bool(config.jdbc_secret_scope) != bool(config.jdbc_secret_key):
+                raise ValueError(
+                    f"Config row for {config.source_table_name} must set both jdbc_secret_scope and jdbc_secret_key"
                 )
             if (
                 config.ingestion_type == "incremental"

@@ -74,6 +74,8 @@ dbutils.widgets.dropdown(
 
 dbutils.widgets.text("catalog", "users", "Target catalog")
 dbutils.widgets.text("schema", "emanuele_rinaldi", "Target schema")
+dbutils.widgets.text("configuration_fqn", "users.emanuele_rinaldi.jdbc_ingestion_config", "Configuration table FQN")
+dbutils.widgets.text("watermark_fqn", "users.emanuele_rinaldi.jdbc_ingestion_watermark", "Watermark table FQN")
 dbutils.widgets.text("ingestion_group", "", "Ingestion group")
 dbutils.widgets.text("source_table_name", "", "Source table name")
 dbutils.widgets.text("jdbc_url", "", "JDBC URL")
@@ -117,18 +119,10 @@ def _as_bool(name: str) -> bool:
 action = _widget("action")
 
 runtime = JdbcRuntimeSettings(
-    catalog=_widget("catalog"),
-    schema=_widget("schema"),
+    configuration_fqn=_widget("configuration_fqn"),
+    watermark_fqn=_widget("watermark_fqn"),
     ingestion_group=_widget("ingestion_group"),
     source_table_name=_widget("source_table_name"),
-    jdbc_url=_widget("jdbc_url"),
-    jdbc_user=_widget("jdbc_user"),
-    jdbc_password=_widget("jdbc_password"),
-    jdbc_secret_scope=_widget("jdbc_secret_scope"),
-    jdbc_secret_key=_widget("jdbc_secret_key"),
-    watermark_threshold_minutes=int(_widget("watermark_threshold_minutes") or "5"),
-    fetch_size=int(_widget("fetch_size") or "10000"),
-    num_partitions=int(_widget("num_partitions") or "8"),
 )
 
 if action == "plan_configs":
@@ -142,10 +136,10 @@ elif action == "run_ingestion":
     result = JdbcIngestionOrchestrator(spark=spark, runtime=runtime).run_selected_ingestion()
     display(spark.createDataFrame(result))
 elif action == "setup_uc":
-    setup = UnityCatalogSetup(spark=spark, catalog=runtime.catalog, schema=runtime.schema)
+    setup = UnityCatalogSetup(spark=spark, catalog=_widget("catalog"), schema=_widget("schema"))
     setup.create_all(truncate_existing=_as_bool("truncate_existing"))
     result = {
-        "schema": f"{runtime.catalog}.{runtime.schema}",
+        "schema": f"{_widget('catalog')}.{_widget('schema')}",
         "config_table": setup.config_table,
         "state_table": setup.state_table,
         "truncate_existing": _as_bool("truncate_existing"),
@@ -176,19 +170,14 @@ elif action == "create_job":
 
     job_settings = JobProvisioningSettings(
         ingestion_group=runtime.ingestion_group,
-        catalog=runtime.catalog,
-        schema=runtime.schema,
+        configuration_fqn=runtime.configuration_fqn,
+        watermark_fqn=runtime.watermark_fqn,
+        planner_notebook_path=str(project_root / "notebooks" / "Task - Plan Configs.py"),
+        worker_notebook_path=str(project_root / "notebooks" / "Task - Run Ingestion.py"),
         wheel_uri=wheel_uri,
         cdc_pipeline_id=_widget("cdc_pipeline_id"),
         cdc_pipeline_file_path=_widget("cdc_pipeline_file_path"),
         foreach_concurrency=int(_widget("foreach_concurrency") or "4"),
-        jdbc_url=runtime.jdbc_url,
-        jdbc_user=runtime.jdbc_user,
-        jdbc_secret_scope=runtime.jdbc_secret_scope,
-        jdbc_secret_key=runtime.jdbc_secret_key,
-        watermark_threshold_minutes=str(runtime.watermark_threshold_minutes),
-        fetch_size=str(runtime.fetch_size),
-        num_partitions=str(runtime.num_partitions),
     )
     result = IngestionJobProvisioner().create_or_update_job(job_settings)
     print(json.dumps(result, indent=2))

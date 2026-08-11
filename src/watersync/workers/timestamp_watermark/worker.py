@@ -26,7 +26,7 @@ class TimestampWatermarkIngestionWorker(JdbcIngestionWorker):
 
         last_watermark = self.get_last_watermark()
         cutoff = (
-            datetime.now() - timedelta(minutes=self.runtime.watermark_threshold_minutes)
+            datetime.now() - timedelta(minutes=self.config.watermark_threshold_minutes)
         ).strftime("%Y-%m-%d %H:%M:%S")
         logger.info(
             "[READ]   %s — incremental window  last_wm=%s  cutoff=%s",
