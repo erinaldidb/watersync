@@ -49,7 +49,7 @@ type Context = { location: Location; setLocation: (location: Location) => void; 
 type ConfigRow = {
   ingestion_group: string;
   source_table_name: string;
-  target_table_name: string | null;
+  staging_table_fqn: string | null;
   target_table_fqn: string;
   ingestion_type: string;
   key_columns: string | null;
@@ -71,7 +71,7 @@ type ConfigRow = {
 type WatermarkRow = {
   ingestion_group: string;
   source_table_name: string;
-  target_table_name: string | null;
+  staging_table_fqn: string | null;
   ingestion_type: string;
   last_watermark: string | null;
   last_run_timestamp: string | null;
@@ -501,7 +501,7 @@ function ConfigDialog({
           originalSourceTableName: row?.source_table_name,
           ingestionGroup: f.get('group'),
           sourceTableName: f.get('source'),
-          targetTableName: f.get('target') || null,
+          stagingTableFqn: f.get('staging_fqn') || null,
           targetTableFqn: f.get('target_fqn'),
           ingestionType: f.get('type'),
           keyColumns: f.get('keys') || null,
@@ -543,7 +543,7 @@ function ConfigDialog({
           <Field name="group" label="Ingestion group" value={row?.ingestion_group} />
           <Field name="source" label="Source table" value={row?.source_table_name} />
           <Field name="target_fqn" label="Final target FQN" value={row?.target_table_fqn} required />
-          <Field name="target" label="Incremental staging table override" value={row?.target_table_name} />
+          <Field name="staging_fqn" label="Staging table FQN" value={row?.staging_table_fqn} />
           <Field name="keys" label="Key columns" value={row?.key_columns} />
           <Field name="watermark" label="Watermark column" value={row?.watermark_column} />
           <Field name="partition" label="Partition column" value={row?.partition_column} />

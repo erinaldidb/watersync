@@ -6,7 +6,7 @@
 SELECT
   ingestion_group,
   source_table_name,
-  target_table_name,
+  staging_table_fqn,
   target_table_fqn,
   lower(coalesce(ingestion_type, 'incremental')) AS ingestion_type,
   key_columns,

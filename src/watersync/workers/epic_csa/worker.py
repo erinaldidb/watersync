@@ -22,7 +22,7 @@ class EpicCsaIngestionWorker(JdbcIngestionWorker):
             FROM {self.runtime.state_table}
             WHERE ingestion_group = '{quote_sql_string(self.config.ingestion_group)}'
               AND source_table_name = '{quote_sql_string(self.config.source_table_name)}'
-              AND target_table_name = '{quote_sql_string(self.config.target_table_fqn)}'
+              AND staging_table_fqn = '{quote_sql_string(self.config.staging_table_fqn)}'
               AND ingestion_type = '{quote_sql_string(self.config.ingestion_type)}'
               AND last_watermark IS NOT NULL
             ORDER BY last_run_timestamp DESC

@@ -6,7 +6,7 @@
 SELECT
   ingestion_group,
   source_table_name,
-  target_table_name,
+  staging_table_fqn,
   ingestion_type,
   last_watermark,
   last_run_timestamp,

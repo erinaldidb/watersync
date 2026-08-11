@@ -9,7 +9,7 @@ const configSchema = locationSchema.extend({
   originalSourceTableName: z.string().optional(),
   ingestionGroup: z.string().min(1),
   sourceTableName: z.string().min(1),
-  targetTableName: z.string().nullable().optional(),
+  stagingTableFqn: z.string().nullable().optional(),
   targetTableFqn: z.string().regex(/^[^.]+\.[^.]+\.[^.]+$/),
   ingestionType: z.enum(['incremental', 'full']),
   keyColumns: z.string().nullable().optional(),
@@ -87,7 +87,7 @@ await createApp({
              ON t.ingestion_group = coalesce(:original_ingestion_group, s.ingestion_group)
              AND t.source_table_name = coalesce(:original_source_table_name, s.source_table_name)
              WHEN MATCHED THEN UPDATE SET ingestion_group=s.ingestion_group, source_table_name=s.source_table_name,
-               target_table_name=:target_table_name, target_table_fqn=:target_table_fqn,
+               staging_table_fqn=:staging_table_fqn, target_table_fqn=:target_table_fqn,
                ingestion_type=:ingestion_type, key_columns=:key_columns,
                watermark_column=:watermark_column, partition_column=:partition_column,
                predicate_column=:predicate_column, epic_csa_enabled=:epic_csa_enabled,
@@ -96,11 +96,11 @@ await createApp({
                watermark_threshold_minutes=:watermark_threshold_minutes, fetch_size=:fetch_size,
                num_partitions=:num_partitions,
                update_dttm=current_timestamp(), enabled=:enabled
-             WHEN NOT MATCHED THEN INSERT (ingestion_group, source_table_name, target_table_name, target_table_fqn,
+             WHEN NOT MATCHED THEN INSERT (ingestion_group, source_table_name, staging_table_fqn, target_table_fqn,
                ingestion_type, key_columns, watermark_column, partition_column, predicate_column, epic_csa_enabled,
                jdbc_url, jdbc_user, jdbc_secret_scope, jdbc_secret_key, connection_name,
                watermark_threshold_minutes, fetch_size, num_partitions, update_dttm, enabled)
-             VALUES (s.ingestion_group, s.source_table_name, :target_table_name, :target_table_fqn,
+             VALUES (s.ingestion_group, s.source_table_name, :staging_table_fqn, :target_table_fqn,
                :ingestion_type, :key_columns, :watermark_column, :partition_column, :predicate_column, :epic_csa_enabled,
                :jdbc_url, :jdbc_user, :jdbc_secret_scope, :jdbc_secret_key, :connection_name,
                :watermark_threshold_minutes, :fetch_size, :num_partitions, current_timestamp(), :enabled)`,
@@ -109,7 +109,7 @@ await createApp({
               parameter('original_source_table_name', body.originalSourceTableName),
               parameter('ingestion_group', body.ingestionGroup),
               parameter('source_table_name', body.sourceTableName),
-              parameter('target_table_name', body.targetTableName),
+              parameter('staging_table_fqn', body.stagingTableFqn),
               parameter('target_table_fqn', body.targetTableFqn),
               parameter('ingestion_type', body.ingestionType),
               parameter('key_columns', body.keyColumns),

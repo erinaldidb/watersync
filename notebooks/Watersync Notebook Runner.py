@@ -72,8 +72,6 @@ dbutils.widgets.dropdown(
     "Watersync action",
 )
 
-dbutils.widgets.text("catalog", "users", "Target catalog")
-dbutils.widgets.text("schema", "emanuele_rinaldi", "Target schema")
 dbutils.widgets.text("configuration_fqn", "users.emanuele_rinaldi.jdbc_ingestion_config", "Configuration table FQN")
 dbutils.widgets.text("watermark_fqn", "users.emanuele_rinaldi.jdbc_ingestion_watermark", "Watermark table FQN")
 dbutils.widgets.text("ingestion_group", "", "Ingestion group")
@@ -136,10 +134,11 @@ elif action == "run_ingestion":
     result = JdbcIngestionOrchestrator(spark=spark, runtime=runtime).run_selected_ingestion()
     display(spark.createDataFrame(result))
 elif action == "setup_uc":
-    setup = UnityCatalogSetup(spark=spark, catalog=_widget("catalog"), schema=_widget("schema"))
+    catalog, schema, _ = _widget("configuration_fqn").split(".")
+    setup = UnityCatalogSetup(spark=spark, catalog=catalog, schema=schema)
     setup.create_all(truncate_existing=_as_bool("truncate_existing"))
     result = {
-        "schema": f"{_widget('catalog')}.{_widget('schema')}",
+        "schema": catalog + "." + schema,
         "config_table": setup.config_table,
         "state_table": setup.state_table,
         "truncate_existing": _as_bool("truncate_existing"),
@@ -196,25 +195,43 @@ table_configs = [
     dict(
         ingestion_group   = "epic",
         source_table_name = "epic.patients",
-        target_table_name = None,           # None -> auto: staging_<source_table>
+        staging_table_fqn = None,           # None -> auto: catalog.schema.staging_<source_table>
+        target_table_fqn  = "serverless_pixels_release_catalog.jdbc_silver.patients",
         ingestion_type    = "incremental",  # "incremental" | "full"
         key_columns       = "patient_id",
         watermark_column  = "updated_at",
         partition_column  = "patient_id",
         predicate_column  = None,
         epic_csa_enabled  = True,
+        #jdbc_url          = "postgresql://ep-billowing-king-d2gq9yas.database.us-east-1.cloud.databricks.com/databricks_postgres?sslmode=require",
+        #jdbc_user         = "users",
+        #jdbc_secret_scope = "slalom_jdbc",
+        #jdbc_secret_key   = "jdbc_pass",
+        connection_name   = "slalom_jdbc_conn",
+        watermark_threshold_minutes = 5,
+        fetch_size        = 10000,
+        num_partitions    = 8,
         enabled           = True,
     ),
     dict(
         ingestion_group   = "epic",
         source_table_name = "epic.encounters",
-        target_table_name = None,           # None -> auto: staging_<source_table>
+        staging_table_fqn = None,           # None -> auto: catalog.schema.staging_<source_table>
+        target_table_fqn  = "serverless_pixels_release_catalog.jdbc_silver.encounters",
         ingestion_type    = "incremental",  # "incremental" | "full"
         key_columns       = "encounter_id",
         watermark_column  = "modified_at",
         partition_column  = "encounter_id",
         predicate_column  = None,
         epic_csa_enabled  = True,
+        #jdbc_url          = "postgresql://ep-billowing-king-d2gq9yas.database.us-east-1.cloud.databricks.com/databricks_postgres?sslmode=require",
+        #jdbc_user         = "users",
+        #jdbc_secret_scope = "slalom_jdbc",
+        #jdbc_secret_key   = "jdbc_pass",
+        connection_name   = "slalom_jdbc_conn",
+        watermark_threshold_minutes = 5,
+        fetch_size        = 10000,
+        num_partitions    = 8,
         enabled           = True,
     ),
     # Add more tables here...
@@ -223,18 +240,27 @@ table_configs = [
 # ─────────────────────────────────────────────────────────────────────────────
 
 from pyspark.sql import functions as F
-from pyspark.sql.types import BooleanType, StringType, StructField, StructType
+from pyspark.sql.types import BooleanType, IntegerType, StringType, StructField, StructType
 
 _cfg_schema = StructType([
     StructField("ingestion_group",   StringType(),  False),
     StructField("source_table_name", StringType(),  False),
-    StructField("target_table_name", StringType(),  True),
+    StructField("staging_table_fqn", StringType(),  True),
+    StructField("target_table_fqn",  StringType(),  True),
     StructField("ingestion_type",    StringType(),  True),
     StructField("key_columns",       StringType(),  True),
     StructField("watermark_column",  StringType(),  True),
     StructField("partition_column",  StringType(),  True),
     StructField("predicate_column",  StringType(),  True),
     StructField("epic_csa_enabled",  BooleanType(), True),
+    StructField("jdbc_url",          StringType(),  True),
+    StructField("jdbc_user",         StringType(),  True),
+    StructField("jdbc_secret_scope", StringType(),  True),
+    StructField("jdbc_secret_key",   StringType(),  True),
+    StructField("connection_name",   StringType(),  True),
+    StructField("watermark_threshold_minutes", IntegerType(), True),
+    StructField("fetch_size",        IntegerType(), True),
+    StructField("num_partitions",    IntegerType(), True),
     StructField("enabled",           BooleanType(), False),
 ])
 
@@ -242,21 +268,28 @@ _rows = [
     (
         r["ingestion_group"],
         r["source_table_name"],
-        r.get("target_table_name"),
+        r.get("staging_table_fqn"),
+        r.get("target_table_fqn"),
         r.get("ingestion_type", "incremental"),
         r.get("key_columns"),
         r.get("watermark_column"),
         r.get("partition_column"),
         r.get("predicate_column"),
         r.get("epic_csa_enabled", False),
+        r.get("jdbc_url"),
+        r.get("jdbc_user"),
+        r.get("jdbc_secret_scope"),
+        r.get("jdbc_secret_key"),
+        r.get("connection_name"),
+        r.get("watermark_threshold_minutes"),
+        r.get("fetch_size"),
+        r.get("num_partitions"),
         r.get("enabled", True),
     )
     for r in table_configs
 ]
 
-_catalog       = dbutils.widgets.get("catalog").strip()
-_schema        = dbutils.widgets.get("schema").strip()
-_config_table  = f"{_catalog}.{_schema}.jdbc_ingestion_config"
+_config_table  = _widget("configuration_fqn")
 
 (
     spark.createDataFrame(_rows, schema=_cfg_schema)
@@ -279,3 +312,14 @@ display(
          .where(F.col("ingestion_group").isin([r["ingestion_group"] for r in table_configs]))
          .orderBy("ingestion_group", "source_table_name")
 )
+
+# COMMAND ----------
+
+# MAGIC %pip install build
+# MAGIC
+# MAGIC !python -m build --wheel ../.
+
+# COMMAND ----------
+
+# MAGIC %sh
+# MAGIC cp "/Workspace/Users/emanuele.rinaldi@databricks.com/EPIC CLARITY - JDBC + Watermark/watersync/dist/watersync-0.1.1-py3-none-any.whl" /Volumes/serverless_pixels_release_catalog/slalom/sample

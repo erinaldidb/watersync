@@ -19,13 +19,19 @@ def normalize_ingestion_type(value: str | None) -> str:
     return normalized
 
 
-def default_target_table_name(source_table_name: str) -> str:
-    return f"staging_{normalize_text(source_table_name).split('.')[-1]}"
+def default_staging_table_fqn(source_table_name: str, catalog: str, schema: str) -> str:
+    short_name = f"staging_{normalize_text(source_table_name).split('.')[-1]}"
+    return f"{catalog}.{schema}.{short_name}"
 
 
-def resolve_target_table_name(raw_target_table_name: str | None, source_table_name: str) -> str:
-    configured_name = normalize_text(raw_target_table_name)
-    return configured_name or default_target_table_name(source_table_name)
+def resolve_staging_table_fqn(
+    raw_staging_table_fqn: str | None,
+    source_table_name: str,
+    catalog: str,
+    schema: str,
+) -> str:
+    configured = normalize_text(raw_staging_table_fqn)
+    return configured or default_staging_table_fqn(source_table_name, catalog, schema)
 
 
 def validate_table_fqn(value: str, field_name: str = "target_table_fqn") -> str:

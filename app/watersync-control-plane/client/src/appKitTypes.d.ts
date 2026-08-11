@@ -17,7 +17,7 @@ declare module '@databricks/appkit-ui/react' {
       result: Array<{
         ingestion_group: string;
         source_table_name: string;
-        target_table_name: string | null;
+        staging_table_fqn: string | null;
         target_table_fqn: string;
         ingestion_type: string;
         key_columns: string | null;
@@ -49,7 +49,7 @@ declare module '@databricks/appkit-ui/react' {
       result: Array<{
         ingestion_group: string;
         source_table_name: string;
-        target_table_name: string | null;
+        staging_table_fqn: string | null;
         ingestion_type: string;
         last_watermark: string | null;
         last_run_timestamp: string | null;

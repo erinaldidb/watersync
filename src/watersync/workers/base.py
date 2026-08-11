@@ -19,8 +19,7 @@ class JdbcIngestionWorker(ABC):
         self.spark = spark
         self.runtime = runtime
         self.config = config
-        config_catalog, config_schema, _ = runtime.configuration_fqn.split(".", 2)
-        self.staging_table_fqn = f"{config_catalog}.{config_schema}.{config.target_table_name}"
+        self.staging_table_fqn = config.staging_table_fqn
         self.write_table_fqn = config.target_table_fqn if config.ingestion_type == "full" else self.staging_table_fqn
 
     def process(self) -> dict[str, Any]:
@@ -141,7 +140,7 @@ class JdbcIngestionWorker(ABC):
             FROM {self.runtime.state_table}
             WHERE ingestion_group = '{quote_sql_string(self.config.ingestion_group)}'
               AND source_table_name = '{quote_sql_string(self.config.source_table_name)}'
-              AND target_table_name = '{quote_sql_string(self.config.target_table_fqn)}'
+              AND staging_table_fqn = '{quote_sql_string(self.config.staging_table_fqn)}'
               AND ingestion_type = '{quote_sql_string(self.config.ingestion_type)}'
               AND last_watermark IS NOT NULL
             ORDER BY last_run_timestamp DESC
@@ -344,7 +343,7 @@ class JdbcIngestionWorker(ABC):
                 (
                     self.config.ingestion_group,
                     self.config.source_table_name,
-                    self.config.target_table_fqn,
+                    self.config.staging_table_fqn,
                     self.config.ingestion_type,
                     str(max_watermark)[:19] if max_watermark is not None else None,
                     now,
@@ -354,7 +353,7 @@ class JdbcIngestionWorker(ABC):
             ],
             schema=(
                 "ingestion_group STRING, source_table_name STRING, "
-                "target_table_name STRING, ingestion_type STRING, "
+                "staging_table_fqn STRING, ingestion_type STRING, "
                 "last_watermark STRING, last_run_timestamp TIMESTAMP, "
                 "status STRING, last_error STRING"
             ),
@@ -368,7 +367,7 @@ class JdbcIngestionWorker(ABC):
                     [
                         "target.ingestion_group = source.ingestion_group",
                         "target.source_table_name = source.source_table_name",
-                        "target.target_table_name = source.target_table_name",
+                        "target.staging_table_fqn = source.staging_table_fqn",
                         "target.ingestion_type = source.ingestion_type",
                     ]
                 ),

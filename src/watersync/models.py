@@ -52,7 +52,7 @@ class JdbcRuntimeSettings:
 class IngestionConfig:
     ingestion_group: str
     source_table_name: str
-    target_table_name: str
+    staging_table_fqn: str
     target_table_fqn: str
     ingestion_type: str
     key_columns: str | None

@@ -4,7 +4,7 @@ from typing import Any
 
 from pyspark.sql.functions import col
 
-from watersync.common import quote_sql_string, resolve_target_table_name, row_to_dict
+from watersync.common import quote_sql_string, resolve_staging_table_fqn, row_to_dict
 
 _METADATA_COLUMNS = ["_ingested_at", "_source_table", "_ingestion_group", "_ingestion_type"]
 _CSA_CONTROL_COLUMNS = ["_IS_DELETED", "_csa_update_dt"]
@@ -115,17 +115,19 @@ class CdcScd2PipelineBuilder:
         )
 
     def build(self) -> None:
+        config_catalog, config_schema, _ = self.configuration_fqn.split(".", 2)
         for config in self.load_configs():
             source_table = config["source_table_name"]
-            staging_table = resolve_target_table_name(config.get("target_table_name"), source_table)
+            staging_fqn = resolve_staging_table_fqn(
+                config.get("staging_table_fqn"), source_table, config_catalog, config_schema
+            )
+            staging_table = staging_fqn.split(".")[-1]
             key_columns = [key.strip() for key in (config["key_columns"] or "").split(",") if key.strip()]
             watermark_column = (config["watermark_column"] or "").strip()
             ingestion_type = (config["ingestion_type"] or "incremental").strip().lower()
             if ingestion_type == "full":
                 continue
             epic_csa_enabled = bool(config["epic_csa_enabled"])
-            config_catalog, config_schema, _ = self.configuration_fqn.split(".", 2)
-            staging_fqn = f"{config_catalog}.{config_schema}.{staging_table}"
             history_table = (config.get("target_table_fqn") or "").strip()
             if len(history_table.split(".")) != 3:
                 raise ValueError(f"target_table_fqn must use catalog.schema.table for {source_table}")

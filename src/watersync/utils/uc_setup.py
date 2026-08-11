@@ -33,7 +33,7 @@ class UnityCatalogSetup:
             CREATE TABLE IF NOT EXISTS IDENTIFIER('{self.config_table}') (
               ingestion_group STRING COMMENT 'Logical group processed by the same Lakeflow Job',
               source_table_name STRING COMMENT 'Fully qualified source table name',
-              target_table_name STRING COMMENT 'Target staging table name',
+              staging_table_fqn STRING COMMENT 'Staging table in catalog.schema.table format',
               target_table_fqn STRING COMMENT 'Final destination in catalog.schema.table format',
               ingestion_type STRING COMMENT 'full or incremental',
               key_columns STRING COMMENT 'Comma-separated business keys',
@@ -90,7 +90,7 @@ class UnityCatalogSetup:
             CREATE OR REPLACE TABLE IDENTIFIER('{self.state_table}') (
               ingestion_group STRING COMMENT 'Matches ingestion_group in config',
               source_table_name STRING COMMENT 'Matches source_table_name in config',
-              target_table_name STRING COMMENT 'Matches target_table_name in config',
+              staging_table_fqn STRING COMMENT 'Matches staging_table_fqn in config',
               ingestion_type STRING COMMENT 'Matches ingestion_type in config',
               last_watermark STRING COMMENT 'Stored watermark value',
               last_run_timestamp TIMESTAMP COMMENT 'Timestamp of the last run',

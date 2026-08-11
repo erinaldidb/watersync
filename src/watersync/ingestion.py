@@ -7,7 +7,7 @@ from watersync.common import (
     normalize_ingestion_type,
     normalize_text,
     quote_sql_string,
-    resolve_target_table_name,
+    resolve_staging_table_fqn,
     row_to_dict,
     validate_table_fqn,
 )
@@ -41,7 +41,7 @@ class JdbcIngestionConfigRepository:
             SELECT
                 ingestion_group,
                 source_table_name,
-                target_table_name,
+                staging_table_fqn,
                 target_table_fqn,
                 lower(coalesce(ingestion_type, 'incremental')) AS ingestion_type,
                 key_columns,
@@ -59,12 +59,15 @@ class JdbcIngestionConfigRepository:
         configs: list[IngestionConfig] = []
         for row in self.spark.sql(query).collect():
             row_dict = row_to_dict(row)
+            config_catalog, config_schema, _ = self.runtime.config_table.split(".", 2)
             config = IngestionConfig(
                 ingestion_group=normalize_text(row_dict.get("ingestion_group")),
                 source_table_name=normalize_text(row_dict.get("source_table_name")),
-                target_table_name=resolve_target_table_name(
-                    row_dict.get("target_table_name"),
+                staging_table_fqn=resolve_staging_table_fqn(
+                    row_dict.get("staging_table_fqn"),
                     normalize_text(row_dict.get("source_table_name")),
+                    config_catalog,
+                    config_schema,
                 ),
                 target_table_fqn=validate_table_fqn(row_dict.get("target_table_fqn") or ""),
                 ingestion_type=normalize_ingestion_type(row_dict.get("ingestion_type")),
