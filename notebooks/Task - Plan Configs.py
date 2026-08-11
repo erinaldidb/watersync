@@ -1,10 +1,4 @@
 # Databricks notebook source
-# DBTITLE 1,Install watersync from repo root
-# MAGIC %pip install ../. --quiet
-# MAGIC dbutils.library.restartPython()
-
-# COMMAND ----------
-
 # DBTITLE 1,Plan configs and publish task value
 from pyspark.sql import SparkSession
 from watersync.config_planner import IngestionConfigPlanner
