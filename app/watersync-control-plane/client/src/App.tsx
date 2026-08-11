@@ -166,7 +166,7 @@ function Layout() {
               <Droplets className="h-5 w-5" />
             </div>
             <div>
-              <div className="brand-name">WaterSync</div>
+              <div className="brand-name">WaterSync <span>Control Plane</span></div>
               <div className="brand-subtitle">JDBC ingestion control plane</div>
             </div>
           </div>
@@ -327,13 +327,14 @@ function OverviewPage() {
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
             <Metric
               icon={TableProperties}
+              tone="info"
               title="Configured sources"
               value={row.config_count}
               note="rows · current location"
             />
             <Metric
               icon={Layers3}
-              tone="primary"
+              tone="success"
               title="Enabled sources"
               value={row.enabled_count}
               note="actual · current state"
@@ -388,11 +389,21 @@ function Metric({
   value: string | number;
   note: string;
   destructive?: boolean;
-  tone?: 'primary';
+  tone?: 'primary' | 'info' | 'success';
 }) {
   return (
     <Card
-      className={`metric-card ${destructive ? 'metric-card-danger' : tone === 'primary' ? 'metric-card-primary' : ''}`}
+      className={`metric-card ${
+        destructive
+          ? 'metric-card-danger'
+          : tone === 'primary'
+            ? 'metric-card-primary'
+            : tone === 'info'
+              ? 'metric-card-info'
+              : tone === 'success'
+                ? 'metric-card-success'
+                : ''
+      }`}
     >
       <CardHeader className="pb-2">
         <div className="flex items-center justify-between">
