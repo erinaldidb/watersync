@@ -15,3 +15,11 @@ test('configuration screen exposes lookup and create actions', async ({ page }) 
   await expect(page.getByLabel('Filter configurations')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Add entry' })).toBeVisible();
 });
+
+test('jobs screen exposes the guided creation form', async ({ page }) => {
+  await page.goto('/jobs');
+  await page.getByRole('button', { name: 'Create job' }).click();
+  await expect(page.getByRole('heading', { name: 'Create or update a WaterSync job' })).toBeVisible();
+  await expect(page.getByLabel('Planner notebook')).toBeVisible();
+  await expect(page.getByLabel('Worker notebook')).toBeVisible();
+});

@@ -29,9 +29,12 @@ const configSchema = locationSchema.extend({
 });
 const keySchema = locationSchema.extend({ ingestionGroup: z.string().min(1), sourceTableName: z.string().min(1) });
 const watermarkSchema = keySchema.extend({ lastWatermark: z.string().nullable(), status: z.string().min(1) });
-const jobPayloadSchema = z.object({
-  jobId: z.number().int().positive().optional(),
-  settings: z.record(z.string(), z.unknown()),
+const jobPayloadSchema = locationSchema.extend({
+  ingestionGroup: z.string().min(1),
+  plannerNotebookPath: z.string().min(1),
+  workerNotebookPath: z.string().min(1),
+  foreachConcurrency: z.number().int().min(1).max(100),
+  cdcPipelineId: z.string().trim().optional(),
 });
 
 const workspace = new WorkspaceClient({});
@@ -191,12 +194,58 @@ await createApp({
       app.post('/api/jobs', async (req, res) => {
         try {
           const body = jobPayloadSchema.parse(req.body);
-          if (body.jobId) {
-            await workspace.jobs.reset({ job_id: body.jobId, new_settings: body.settings as jobs.JobSettings });
-            res.json({ jobId: body.jobId });
+          const name = `[${body.ingestionGroup}] Ingestion Pipeline`;
+          const configurationFqn = `${body.catalog}.${body.schema}.jdbc_ingestion_config`;
+          const watermarkFqn = `${body.catalog}.${body.schema}.jdbc_ingestion_watermark`;
+          const tasks: jobs.Task[] = [
+            {
+              task_key: 'ingestion_configs',
+              notebook_task: { notebook_path: body.plannerNotebookPath, source: 'WORKSPACE' },
+            },
+            {
+              task_key: 'ingestion_worker',
+              depends_on: [{ task_key: 'ingestion_configs' }],
+              for_each_task: {
+                inputs: '{{tasks.ingestion_configs.values.table_configs}}',
+                concurrency: body.foreachConcurrency,
+                task: {
+                  task_key: 'ingestion_worker_iteration',
+                  notebook_task: {
+                    notebook_path: body.workerNotebookPath,
+                    source: 'WORKSPACE',
+                    base_parameters: { source_table_name: '{{input.source_table_name}}' },
+                  },
+                },
+              },
+            },
+          ];
+          if (body.cdcPipelineId) {
+            tasks.push({
+              task_key: 'cdc_scd2_pipeline',
+              depends_on: [{ task_key: 'ingestion_worker' }],
+              pipeline_task: { pipeline_id: body.cdcPipelineId, full_refresh: false },
+            });
+          }
+          const settings: jobs.JobSettings = {
+            name,
+            max_concurrent_runs: 1,
+            parameters: [
+              { name: 'configuration_fqn', default: configurationFqn },
+              { name: 'watermark_fqn', default: watermarkFqn },
+              { name: 'ingestion_group', default: body.ingestionGroup },
+            ],
+            tasks,
+          };
+          const existing = [];
+          for await (const job of workspace.jobs.list({ name, limit: 25, expand_tasks: false })) {
+            if (job.settings?.name === name) existing.push(job);
+          }
+          if (existing[0]?.job_id) {
+            await workspace.jobs.reset({ job_id: existing[0].job_id, new_settings: settings });
+            res.json({ jobId: existing[0].job_id, action: 'updated' });
           } else {
-            const created = await workspace.jobs.create(body.settings as jobs.CreateJob);
-            res.json({ jobId: created.job_id });
+            const created = await workspace.jobs.create(settings as jobs.CreateJob);
+            res.json({ jobId: created.job_id, action: 'created' });
           }
         } catch (error) {
           handleError(res, error);

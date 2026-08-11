@@ -39,10 +39,24 @@ import {
   TableHead,
   TableHeader,
   TableRow,
-  Textarea,
   useAnalyticsQuery,
 } from '@databricks/appkit-ui/react';
-import { Activity, Database, Droplets, Play, Plus, RefreshCw, Settings2, Trash2, Workflow } from 'lucide-react';
+import {
+  Activity,
+  CheckCircle2,
+  Clock3,
+  Database,
+  Droplets,
+  Layers3,
+  Play,
+  Plus,
+  RefreshCw,
+  Settings2,
+  TableProperties,
+  Trash2,
+  TriangleAlert,
+  Workflow,
+} from 'lucide-react';
 
 type Location = { catalog: string; schema: string };
 type Context = { location: Location; setLocation: (location: Location) => void; revision: number; refresh: () => void };
@@ -140,32 +154,28 @@ function Layout() {
     ['/jobs', 'Jobs', Workflow],
   ] as const;
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <header className="border-b bg-card">
-        <div className="mx-auto flex max-w-screen-2xl flex-wrap items-center gap-4 px-5 py-3">
-          <div className="mr-4 flex items-center gap-2 font-semibold">
-            <Database className="h-5 w-5" /> WaterSync Control Plane
+    <div className="app-shell min-h-screen bg-background text-foreground">
+      <header className="app-header">
+        <div className="mx-auto flex max-w-screen-2xl flex-wrap items-center gap-4 px-6 py-4">
+          <div className="brand-lockup mr-auto">
+            <div className="brand-mark">
+              <Droplets className="h-5 w-5" />
+            </div>
+            <div>
+              <div className="brand-name">WaterSync</div>
+              <div className="brand-subtitle">JDBC ingestion control plane</div>
+            </div>
           </div>
-          <nav className="flex flex-1 flex-wrap gap-1">
-            {links.map(([to, label, Icon]) => (
-              <NavLink
-                key={to}
-                to={to}
-                end={to === '/'}
-                className={({ isActive }) =>
-                  `flex items-center gap-2 rounded-md px-3 py-2 text-sm ${isActive ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted'}`
-                }
-              >
-                <Icon className="h-4 w-4" />
-                {label}
-              </NavLink>
-            ))}
-          </nav>
+          <Badge variant="outline" className="hidden sm:flex">
+            <span className="status-dot" /> Connected
+          </Badge>
           <Dialog>
             <DialogTrigger asChild>
-              <Button variant="outline" size="sm">
+              <Button variant="outline" className="context-button">
                 <Database className="mr-2 h-4 w-4" />
-                {location.catalog}.{location.schema}
+                <span className="max-w-64 truncate">
+                  {location.catalog}.{location.schema}
+                </span>
               </Button>
             </DialogTrigger>
             <DialogContent>
@@ -201,8 +211,23 @@ function Layout() {
             </DialogContent>
           </Dialog>
         </div>
+        <div className="nav-strip">
+          <nav className="mx-auto flex max-w-screen-2xl gap-1 overflow-x-auto px-6">
+            {links.map(([to, label, Icon]) => (
+              <NavLink
+                key={to}
+                to={to}
+                end={to === '/'}
+                className={({ isActive }) => `nav-link ${isActive ? 'nav-link-active' : ''}`}
+              >
+                <Icon className="h-4 w-4" />
+                {label}
+              </NavLink>
+            ))}
+          </nav>
+        </div>
       </header>
-      <main className="mx-auto max-w-screen-2xl p-5">
+      <main className="mx-auto max-w-screen-2xl p-6 lg:py-8">
         <Outlet context={context} />
       </main>
     </div>
@@ -212,10 +237,10 @@ const useControl = () => useOutletContext<Context>();
 
 function PageTitle({ title, description, action }: { title: string; description: string; action?: React.ReactNode }) {
   return (
-    <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
+    <div className="page-title mb-6 flex flex-wrap items-start justify-between gap-4">
       <div>
-        <h1 className="text-2xl font-semibold">{title}</h1>
-        <p className="text-sm text-muted-foreground">{description}</p>
+        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
+        <p className="mt-1 text-sm text-muted-foreground">{description}</p>
       </div>
       {action}
     </div>
@@ -270,64 +295,135 @@ function OverviewPage() {
           </EmptyHeader>
         </Empty>
       ) : (
-        <div className="grid gap-4 md:grid-cols-4">
-          <Metric title="Configured sources" value={row.config_count} note="rows · current location" />
-          <Metric title="Enabled sources" value={row.enabled_count} note="actual · current period" />
-          <Metric
-            title="Failed sources"
-            value={row.failed_count}
-            note="actual status · investigate"
-            destructive={Number(row.failed_count) > 0}
-          />
-          <Metric
-            title="Latest pipeline activity"
-            value={displayTime(row.last_run_timestamp)}
-            note={`source: ${location.catalog}.${location.schema}`}
-          />
-        </div>
+        <>
+          <Card className="overview-hero mb-7 overflow-hidden">
+            <CardContent className="flex flex-wrap items-center justify-between gap-5 p-6">
+              <div>
+                <div className="eyebrow">Active metadata environment</div>
+                <h2 className="mt-1 text-xl font-semibold">{location.catalog}</h2>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Badge variant="secondary">Schema · {location.schema}</Badge>
+                  <Badge variant="outline">SQL warehouse live</Badge>
+                  <Badge variant="outline">{row.enabled_count} sources enabled</Badge>
+                </div>
+              </div>
+              <div className="hero-health">
+                <CheckCircle2 className="h-5 w-5" />
+                <div>
+                  <div className="font-semibold">Control plane ready</div>
+                  <div className="text-xs opacity-80">Configuration loaded successfully</div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-lg font-semibold">Pipeline health</h2>
+            <span className="text-xs text-muted-foreground">Actual · refreshed on demand</span>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <Metric
+              icon={TableProperties}
+              title="Configured sources"
+              value={row.config_count}
+              note="rows · current location"
+            />
+            <Metric
+              icon={Layers3}
+              tone="primary"
+              title="Enabled sources"
+              value={row.enabled_count}
+              note="actual · current state"
+            />
+            <Metric
+              icon={TriangleAlert}
+              title="Failed sources"
+              value={row.failed_count}
+              note="actual status · investigate"
+              destructive={Number(row.failed_count) > 0}
+            />
+            <Metric
+              icon={Clock3}
+              title="Latest pipeline activity"
+              value={displayTime(row.last_run_timestamp)}
+              note={`source: ${location.catalog}.${location.schema}`}
+            />
+          </div>
+        </>
       )}
-      <Card className="mt-6">
+      <Card className="mt-8 overflow-hidden">
         <CardHeader>
-          <CardTitle>Operating model</CardTitle>
+          <CardTitle>WaterSync workflow</CardTitle>
           <CardDescription>
             Configure ingestion sources, inspect or reset incremental state, then create and run framework jobs.
           </CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-3 md:grid-cols-3">
-          <Hint title="1. Configuration" text="Maintain JDBC source mappings and enablement." />
-          <Hint title="2. Watermarks" text="Correct state or delete a row to force a full incremental reload." />
-          <Hint title="3. Jobs" text="Create, replace, monitor, and trigger Lakeflow Jobs." />
+        <CardContent className="grid gap-0 p-0 md:grid-cols-3">
+          <Hint
+            number="01"
+            icon={Settings2}
+            title="Configuration"
+            text="Maintain JDBC source mappings and enablement."
+          />
+          <Hint number="02" icon={Droplets} title="Watermarks" text="Correct state or force an incremental reload." />
+          <Hint number="03" icon={Workflow} title="Jobs" text="Create, monitor, and trigger Lakeflow Jobs." />
         </CardContent>
       </Card>
     </>
   );
 }
 function Metric({
+  icon: Icon,
   title,
   value,
   note,
   destructive = false,
+  tone,
 }: {
+  icon: React.ComponentType<{ className?: string }>;
   title: string;
   value: string | number;
   note: string;
   destructive?: boolean;
+  tone?: 'primary';
 }) {
   return (
-    <Card>
+    <Card
+      className={`metric-card ${destructive ? 'metric-card-danger' : tone === 'primary' ? 'metric-card-primary' : ''}`}
+    >
       <CardHeader className="pb-2">
-        <CardDescription>{title}</CardDescription>
-        <CardTitle className={destructive ? 'text-destructive' : ''}>{value}</CardTitle>
+        <div className="flex items-center justify-between">
+          <CardDescription className="font-medium uppercase tracking-wide">{title}</CardDescription>
+          <div className="metric-icon">
+            <Icon className="h-4 w-4" />
+          </div>
+        </div>
+        <CardTitle className={`metric-value ${destructive ? 'text-destructive' : ''}`}>{value}</CardTitle>
       </CardHeader>
       <CardContent className="text-xs text-muted-foreground">{note}</CardContent>
     </Card>
   );
 }
-function Hint({ title, text }: { title: string; text: string }) {
+function Hint({
+  number,
+  icon: Icon,
+  title,
+  text,
+}: {
+  number: string;
+  icon: React.ComponentType<{ className?: string }>;
+  title: string;
+  text: string;
+}) {
   return (
-    <div className="rounded-md border p-4">
-      <div className="font-medium">{title}</div>
-      <div className="mt-1 text-sm text-muted-foreground">{text}</div>
+    <div className="workflow-step">
+      <div className="workflow-number">{number}</div>
+      <div className="workflow-icon">
+        <Icon className="h-5 w-5" />
+      </div>
+      <div>
+        <div className="font-medium">{title}</div>
+        <div className="mt-1 text-sm text-muted-foreground">{text}</div>
+      </div>
     </div>
   );
 }
@@ -792,11 +888,23 @@ function WatermarkDialog({
 }
 
 function JobsPage() {
+  const { location, revision } = useControl();
   const [jobs, setJobs] = useState<JobRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
-  const [jobId, setJobId] = useState<number | undefined>();
+  const groupParams = useMemo(
+    () => ({
+      table_name: sql.string(fqn(location, 'jdbc_ingestion_config')),
+      refresh_token: sql.int(revision),
+    }),
+    [location, revision]
+  );
+  const {
+    data: groups,
+    loading: groupsLoading,
+    error: groupsError,
+  } = useAnalyticsQuery('ingestion_groups', groupParams);
   const load = () => {
     setLoading(true);
     api<{ jobs: JobRow[] }>('/api/jobs')
@@ -820,14 +928,9 @@ function JobsPage() {
     <>
       <PageTitle
         title="WaterSync Lakeflow Jobs"
-        description="Jobs visible to the app service principal. Create or replace definitions, then trigger runs."
+        description="Create one managed job per configured ingestion group, then trigger runs."
         action={
-          <Button
-            onClick={() => {
-              setJobId(undefined);
-              setOpen(true);
-            }}
-          >
+          <Button onClick={() => setOpen(true)}>
             <Plus className="mr-2 h-4 w-4" />
             Create job
           </Button>
@@ -870,15 +973,6 @@ function JobsPage() {
                   <Play className="mr-2 h-4 w-4" />
                   Run now
                 </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    setJobId(job.job_id);
-                    setOpen(true);
-                  }}
-                >
-                  Replace definition
-                </Button>
               </CardContent>
             </Card>
           ))}
@@ -887,7 +981,10 @@ function JobsPage() {
       <JobDialog
         open={open}
         onOpenChange={setOpen}
-        jobId={jobId}
+        location={location}
+        groups={groups ?? []}
+        groupsLoading={groupsLoading}
+        groupsError={groupsError}
         onSaved={() => {
           setOpen(false);
           load();
@@ -896,69 +993,48 @@ function JobsPage() {
     </>
   );
 }
-const defaultJob = JSON.stringify(
-  {
-    name: '[group] Ingestion Pipeline',
-    max_concurrent_runs: 1,
-    parameters: [
-      {
-        name: 'configuration_fqn',
-        default: 'serverless_pixels_release_catalog.jdbc_incremental_gh.jdbc_ingestion_config',
-      },
-      {
-        name: 'watermark_fqn',
-        default: 'serverless_pixels_release_catalog.jdbc_incremental_gh.jdbc_ingestion_watermark',
-      },
-      { name: 'ingestion_group', default: 'group' },
-    ],
-    tasks: [
-      {
-        task_key: 'ingestion_configs',
-        notebook_task: { notebook_path: '/Workspace/path/Task - Plan Configs.py', source: 'WORKSPACE' },
-      },
-      {
-        task_key: 'ingestion_worker',
-        depends_on: [{ task_key: 'ingestion_configs' }],
-        for_each_task: {
-          inputs: '{{tasks.ingestion_configs.values.table_configs}}',
-          concurrency: 4,
-          task: {
-            task_key: 'ingestion_worker_iteration',
-            notebook_task: {
-              notebook_path: '/Workspace/path/Task - Run Ingestion.py',
-              source: 'WORKSPACE',
-              base_parameters: { source_table_name: '{{input.source_table_name}}' },
-            },
-          },
-        },
-      },
-    ],
-  },
-  null,
-  2
-);
 function JobDialog({
   open,
   onOpenChange,
-  jobId,
+  location,
+  groups,
+  groupsLoading,
+  groupsError,
   onSaved,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
-  jobId?: number;
+  location: Location;
+  groups: Array<{ ingestion_group: string; source_count: number; enabled_source_count: number }>;
+  groupsLoading: boolean;
+  groupsError: string | null;
   onSaved: () => void;
 }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [ingestionGroup, setIngestionGroup] = useState('');
+  useEffect(() => {
+    if (open && !ingestionGroup && groups[0]) setIngestionGroup(groups[0].ingestion_group);
+  }, [open, ingestionGroup, groups]);
+  const selectedGroup = groups.find((group) => group.ingestion_group === ingestionGroup);
   const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      const raw = new FormData(e.currentTarget).get('settings');
-      if (typeof raw !== 'string') throw new Error('Job settings JSON is required');
-      const settings: unknown = JSON.parse(raw);
-      await api<unknown>('/api/jobs', { method: 'POST', body: JSON.stringify({ jobId, settings }) });
+      const form = new FormData(e.currentTarget);
+      const result = await api<{ jobId: number; action: 'created' | 'updated' }>('/api/jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          ...location,
+          ingestionGroup,
+          plannerNotebookPath: form.get('plannerNotebookPath'),
+          workerNotebookPath: form.get('workerNotebookPath'),
+          foreachConcurrency: Number(form.get('foreachConcurrency')),
+          cdcPipelineId: form.get('cdcPipelineId'),
+        }),
+      });
+      alert(`Job ${result.jobId} ${result.action}`);
       onSaved();
     } catch (x) {
       setError((x as Error).message);
@@ -968,21 +1044,99 @@ function JobDialog({
   };
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl">
+      <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{jobId ? `Replace job ${jobId}` : 'Create WaterSync job'}</DialogTitle>
+          <DialogTitle>Create or update a WaterSync job</DialogTitle>
           <DialogDescription>
-            Provide a Jobs API 2.1 settings object. Secret values must reference Databricks secret scopes; never paste
-            credentials here.
+            Select a configured ingestion group. WaterSync generates the parameters and task graph automatically.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={(event) => void submit(event)} className="space-y-4">
           {error && <ErrorState message={error} />}
-          <Label htmlFor="settings">Job settings JSON</Label>
-          <Textarea id="settings" name="settings" className="min-h-96 font-mono text-xs" defaultValue={defaultJob} />
+          {groupsError && <ErrorState message={groupsError} />}
+          <div className="space-y-2">
+            <Label htmlFor="ingestion-group">Ingestion group</Label>
+            {groupsLoading ? (
+              <Skeleton className="h-10" />
+            ) : groups.length ? (
+              <Select value={ingestionGroup} onValueChange={setIngestionGroup}>
+                <SelectTrigger id="ingestion-group">
+                  <SelectValue placeholder="Select an ingestion group" />
+                </SelectTrigger>
+                <SelectContent>
+                  {groups.map((group) => (
+                    <SelectItem key={group.ingestion_group} value={group.ingestion_group}>
+                      {group.ingestion_group} · {group.enabled_source_count} enabled sources
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : (
+              <Empty>
+                <EmptyHeader>
+                  <EmptyTitle>No ingestion groups found</EmptyTitle>
+                  <EmptyDescription>Add a row to the configuration table before creating a job.</EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+            )}
+          </div>
+          {selectedGroup && (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Generated job</CardTitle>
+                <CardDescription>
+                  [{selectedGroup.ingestion_group}] Ingestion Pipeline · {selectedGroup.source_count} configured sources
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-1 text-sm text-muted-foreground">
+                <div>configuration_fqn: {fqn(location, 'jdbc_ingestion_config')}</div>
+                <div>watermark_fqn: {fqn(location, 'jdbc_ingestion_watermark')}</div>
+                <div>ingestion_group: {selectedGroup.ingestion_group}</div>
+              </CardContent>
+            </Card>
+          )}
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="planner-notebook">Planner notebook</Label>
+              <Input
+                id="planner-notebook"
+                name="plannerNotebookPath"
+                defaultValue="/Workspace/Shared/watersync/Task - Plan Configs"
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="worker-notebook">Worker notebook</Label>
+              <Input
+                id="worker-notebook"
+                name="workerNotebookPath"
+                defaultValue="/Workspace/Shared/watersync/Task - Run Ingestion"
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="concurrency">Parallel tables</Label>
+              <Input
+                id="concurrency"
+                name="foreachConcurrency"
+                type="number"
+                min="1"
+                max="100"
+                defaultValue="4"
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="pipeline-id">CDC pipeline ID (optional)</Label>
+              <Input id="pipeline-id" name="cdcPipelineId" placeholder="Adds the CDC task when provided" />
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            If a job with the generated name already exists, its definition is updated in place.
+          </p>
           <DialogFooter>
-            <Button type="submit" disabled={busy}>
-              {busy ? 'Saving…' : jobId ? 'Replace job' : 'Create job'}
+            <Button type="submit" disabled={busy || !ingestionGroup || groupsLoading}>
+              {busy ? 'Saving…' : 'Create or update job'}
             </Button>
           </DialogFooter>
         </form>

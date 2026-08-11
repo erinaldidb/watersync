@@ -67,6 +67,15 @@ declare module '@databricks/appkit-ui/react' {
         last_run_timestamp: string | null;
       }>;
     };
+    ingestion_groups: {
+      name: 'ingestion_groups';
+      parameters: { table_name: StringParam; refresh_token: IntParam };
+      result: Array<{
+        ingestion_group: string;
+        source_count: number;
+        enabled_source_count: number;
+      }>;
+    };
   }
 }
 

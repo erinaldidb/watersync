@@ -1,5 +1,175 @@
 @import '@databricks/appkit-ui/styles.css';
 
+body {
+  background: color-mix(in oklch, var(--muted) 48%, var(--background));
+}
+.app-shell {
+  background-image: linear-gradient(to bottom, color-mix(in oklch, var(--primary) 4%, transparent), transparent 22rem);
+}
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in oklch, var(--background) 94%, transparent);
+  backdrop-filter: blur(14px);
+}
+.brand-lockup {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.brand-mark {
+  display: grid;
+  height: 2.5rem;
+  width: 2.5rem;
+  place-items: center;
+  border-radius: 0.75rem;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  box-shadow: 0 8px 24px color-mix(in oklch, var(--primary) 20%, transparent);
+}
+.brand-name {
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+.brand-subtitle {
+  margin-top: 0.15rem;
+  color: var(--muted-foreground);
+  font-size: 0.72rem;
+}
+.status-dot {
+  height: 0.45rem;
+  width: 0.45rem;
+  border-radius: 999px;
+  background: var(--success);
+}
+.context-button {
+  background: var(--card);
+  box-shadow: 0 1px 2px color-mix(in oklch, var(--foreground) 7%, transparent);
+}
+.nav-strip {
+  border-top: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+}
+.nav-link {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-bottom: 2px solid transparent;
+  padding: 0.8rem 1rem 0.7rem;
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition:
+    color 150ms,
+    border-color 150ms;
+}
+.nav-link:hover {
+  color: var(--foreground);
+}
+.nav-link-active {
+  border-bottom-color: var(--primary);
+  color: var(--primary);
+}
+.overview-hero {
+  border-color: color-mix(in oklch, var(--primary) 20%, var(--border));
+  background: linear-gradient(120deg, color-mix(in oklch, var(--primary) 8%, var(--card)), var(--card) 58%);
+  box-shadow: 0 12px 32px color-mix(in oklch, var(--foreground) 6%, transparent);
+}
+.eyebrow {
+  color: var(--muted-foreground);
+  font-size: 0.7rem;
+  font-weight: 650;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.hero-health {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  border-radius: 0.75rem;
+  background: color-mix(in oklch, var(--success) 13%, var(--card));
+  color: var(--success);
+  padding: 0.85rem 1rem;
+}
+.metric-card {
+  position: relative;
+  min-height: 9.5rem;
+  overflow: hidden;
+  box-shadow: 0 4px 18px color-mix(in oklch, var(--foreground) 5%, transparent);
+}
+.metric-card::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--border);
+  content: '';
+}
+.metric-card-primary::before {
+  background: var(--primary);
+}
+.metric-card-danger::before {
+  background: var(--destructive);
+}
+.metric-icon {
+  display: grid;
+  height: 2rem;
+  width: 2rem;
+  place-items: center;
+  border-radius: 0.55rem;
+  background: var(--muted);
+  color: var(--muted-foreground);
+}
+.metric-card-primary .metric-icon {
+  background: color-mix(in oklch, var(--primary) 12%, var(--card));
+  color: var(--primary);
+}
+.metric-card-danger .metric-icon {
+  background: color-mix(in oklch, var(--destructive) 10%, var(--card));
+  color: var(--destructive);
+}
+.metric-value {
+  margin-top: 0.65rem;
+  font-size: clamp(1.45rem, 2vw, 2rem);
+  letter-spacing: -0.035em;
+}
+.workflow-step {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: start;
+  gap: 0.85rem;
+  padding: 1.35rem;
+  border-top: 1px solid var(--border);
+}
+.workflow-step + .workflow-step {
+  border-left: 1px solid var(--border);
+}
+.workflow-number {
+  color: var(--muted-foreground);
+  font-family: ui-monospace, monospace;
+  font-size: 0.7rem;
+}
+.workflow-icon {
+  display: grid;
+  height: 2.25rem;
+  width: 2.25rem;
+  place-items: center;
+  border-radius: 0.65rem;
+  background: color-mix(in oklch, var(--primary) 10%, var(--card));
+  color: var(--primary);
+}
+
+@media (max-width: 767px) {
+  .workflow-step + .workflow-step {
+    border-left: 0;
+  }
+  .hero-health {
+    width: 100%;
+  }
+}
+
 :root {
   /* --radius: 0.625rem;
   --background: oklch(1 0 0);
