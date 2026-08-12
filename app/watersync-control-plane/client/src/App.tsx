@@ -1174,6 +1174,8 @@ function JobDialog({
   const [ingestionGroup, setIngestionGroup] = useState('');
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [scheduleActive, setScheduleActive] = useState(true);
+  const [gitUrl, setGitUrl] = useState('https://github.com/erinaldidb/watersync');
+  const [gitBranch, setGitBranch] = useState('main');
   useEffect(() => {
     if (open && !ingestionGroup && groups[0]) setIngestionGroup(groups[0].ingestion_group);
   }, [open, ingestionGroup, groups]);
@@ -1293,13 +1295,20 @@ function JobDialog({
                     id="git-url"
                     name="gitUrl"
                     type="url"
-                    defaultValue="https://github.com/erinaldidb/watersync"
+                    value={gitUrl}
+                    onChange={(event) => setGitUrl(event.target.value)}
                     placeholder="https://github.com/organization/repository"
                   />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="git-branch">Branch</Label>
-                  <Input id="git-branch" name="gitBranch" defaultValue="main" placeholder="main" />
+                  <Input
+                    id="git-branch"
+                    name="gitBranch"
+                    value={gitBranch}
+                    onChange={(event) => setGitBranch(event.target.value)}
+                    placeholder="main"
+                  />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="concurrency">Parallel tables</Label>
@@ -1330,6 +1339,15 @@ function JobDialog({
                       The CDC declarative pipeline task will be omitted for this ingestion group.
                     </p>
                   )}
+                </div>
+                <div className="space-y-2 md:col-span-2">
+                  <Label>Task library</Label>
+                  <div className="break-all rounded-md border bg-muted/30 p-3 font-mono text-xs">
+                    watersync @ git+{gitUrl.replace(/\.git$/, '')}.git@{gitBranch || 'main'}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Installed on the planner and every ingestion worker task from the selected branch.
+                  </p>
                 </div>
               </div>
             </TabsContent>
