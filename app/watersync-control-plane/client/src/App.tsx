@@ -1416,8 +1416,8 @@ function JobDialog({
                     <Input
                       id="spark-version"
                       name="sparkVersion"
-                      defaultValue="16.4.x-scala2.12"
-                      placeholder="16.4.x-scala2.12"
+                      defaultValue="18.x-scala2.13"
+                      placeholder="18.x-scala2.13"
                       required
                     />
                   </div>
