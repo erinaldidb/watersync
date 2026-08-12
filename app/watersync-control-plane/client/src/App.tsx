@@ -1051,7 +1051,14 @@ function JobsPage() {
               <CardContent className="space-y-5">
                 <div className="rounded-md border bg-muted/30 p-3">
                   <div className="mb-1 flex items-center justify-between gap-3">
-                    <span className="text-sm font-medium">Schedule</span>
+                    <div className="flex min-w-0 items-center gap-3">
+                      <span className="text-sm font-medium">Schedule</span>
+                      {job.settings?.schedule && (
+                        <span className="truncate font-mono text-xs text-foreground">
+                          {job.settings.schedule.quartz_cron_expression}
+                        </span>
+                      )}
+                    </div>
                     <Badge variant={job.settings?.schedule?.pause_status === 'UNPAUSED' ? 'secondary' : 'outline'}>
                       {!job.settings?.schedule
                         ? 'Manual only'
@@ -1061,10 +1068,7 @@ function JobsPage() {
                     </Badge>
                   </div>
                   {job.settings?.schedule ? (
-                    <div className="space-y-1 text-xs text-muted-foreground">
-                      <div className="font-mono text-foreground">{job.settings.schedule.quartz_cron_expression}</div>
-                      <div>{job.settings.schedule.timezone_id}</div>
-                    </div>
+                    <div className="text-xs text-muted-foreground">{job.settings.schedule.timezone_id}</div>
                   ) : (
                     <p className="text-xs text-muted-foreground">Runs only when manually triggered.</p>
                   )}
