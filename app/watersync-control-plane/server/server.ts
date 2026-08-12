@@ -1,5 +1,5 @@
 import { analytics, createApp, server } from '@databricks/appkit';
-import { WorkspaceClient, compute, jobs, sql as dbsql } from '@databricks/sdk-experimental';
+import { WorkspaceClient, jobs, sql as dbsql } from '@databricks/sdk-experimental';
 import { z } from 'zod';
 
 const identifierPart = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
@@ -52,11 +52,8 @@ const jobSchedulePayloadSchema = scheduleSchema.extend({ jobId: z.number().int()
 const plannerNotebookPath = 'notebooks/Task - Plan Configs';
 const workerNotebookPath = 'notebooks/Task - Run Ingestion';
 
-const watersyncLibrary = (gitUrl: string, gitBranch: string): compute.Library => ({
-  pypi: {
-    package: `watersync @ git+${gitUrl.replace(/\.git$/, '')}.git@${gitBranch}`,
-  },
-});
+const watersyncDependency = (gitUrl: string, gitBranch: string) =>
+  `watersync @ git+${gitUrl.replace(/\.git$/, '')}.git@${gitBranch}`;
 
 const workspace = new WorkspaceClient({});
 const requiredEnv = (name: string) => {
@@ -266,12 +263,13 @@ await createApp({
           const name = `[${body.ingestionGroup}] Ingestion Pipeline`;
           const configurationFqn = `${body.catalog}.${body.schema}.jdbc_ingestion_config`;
           const watermarkFqn = `${body.catalog}.${body.schema}.jdbc_ingestion_watermark`;
-          const libraries = [watersyncLibrary(body.gitUrl, body.gitBranch)];
+          const environmentKey = 'watersync_environment';
+          const dependency = watersyncDependency(body.gitUrl, body.gitBranch);
           const tasks: jobs.Task[] = [
             {
               task_key: 'ingestion_configs',
               notebook_task: { notebook_path: plannerNotebookPath, source: 'GIT' },
-              libraries,
+              environment_key: environmentKey,
             },
             {
               task_key: 'ingestion_worker',
@@ -281,7 +279,7 @@ await createApp({
                 concurrency: body.foreachConcurrency,
                 task: {
                   task_key: 'ingestion_worker_iteration',
-                  libraries,
+                  environment_key: environmentKey,
                   notebook_task: {
                     notebook_path: workerNotebookPath,
                     source: 'GIT',
@@ -301,6 +299,12 @@ await createApp({
           const settings: jobs.JobSettings = {
             name,
             max_concurrent_runs: 1,
+            environments: [
+              {
+                environment_key: environmentKey,
+                spec: { environment_version: '4', dependencies: [dependency] },
+              },
+            ],
             parameters: [
               { name: 'configuration_fqn', default: configurationFqn },
               { name: 'watermark_fqn', default: watermarkFqn },
