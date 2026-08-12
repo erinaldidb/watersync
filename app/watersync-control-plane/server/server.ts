@@ -1,5 +1,5 @@
 import { analytics, createApp, server } from '@databricks/appkit';
-import { WorkspaceClient, jobs, sql as dbsql } from '@databricks/sdk-experimental';
+import { WorkspaceClient, jobs, pipelines, sql as dbsql } from '@databricks/sdk-experimental';
 import { z } from 'zod';
 
 const identifierPart = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
@@ -122,6 +122,81 @@ async function groupHasEnabledIncrementalSource(catalog: string, schema: string,
     [parameter('ingestion_group', ingestionGroup)]
   );
   return response.result?.data_array?.[0]?.[0]?.toLowerCase() === 'true';
+}
+
+const pipelineBootstrap = `from __future__ import annotations
+
+from pyspark import pipelines as dp
+from pyspark.sql import SparkSession
+
+from watersync.cdc_pipeline import build_pipeline_from_spark_conf
+
+spark = SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
+build_pipeline_from_spark_conf(spark=spark, dp_module=dp)
+`;
+
+async function ensureCdcPipeline({
+  pipelineId,
+  catalog,
+  schema,
+  ingestionGroup,
+  gitUrl,
+  gitBranch,
+}: {
+  pipelineId?: string | null;
+  catalog: string;
+  schema: string;
+  ingestionGroup: string;
+  gitUrl: string;
+  gitBranch: string;
+}) {
+  if (pipelineId) return pipelineId;
+
+  const pipelineName = `[${ingestionGroup}] CDC SCD2 Pipeline`;
+  const safeNamePrefix = `[${ingestionGroup}] CDC SCD2`.replace(/'/g, "''");
+  let existingPipelineId: string | undefined;
+  for await (const pipeline of workspace.pipelines.listPipelines({ filter: `name LIKE '${safeNamePrefix}%'` })) {
+    if (pipeline.name === pipelineName && pipeline.pipeline_id) {
+      existingPipelineId = pipeline.pipeline_id;
+      break;
+    }
+  }
+
+  const safeGroup = ingestionGroup.replace(/[^A-Za-z0-9_-]/g, '_');
+  const bootstrapDirectory = '/Shared/watersync-generated-pipelines';
+  const bootstrapWorkspacePath = `${bootstrapDirectory}/${safeGroup}_cdc_pipeline.py`;
+  await workspace.workspace.mkdirs({ path: bootstrapDirectory });
+  await workspace.workspace.import({
+    path: bootstrapWorkspacePath,
+    format: 'RAW',
+    overwrite: true,
+    content: Buffer.from(pipelineBootstrap).toString('base64'),
+  });
+
+  const configurationFqn = `${catalog}.${schema}.jdbc_ingestion_config`;
+  const watermarkFqn = `${catalog}.${schema}.jdbc_ingestion_watermark`;
+  const pipelineSettings: pipelines.CreatePipeline = {
+    name: pipelineName,
+    catalog,
+    target: schema,
+    configuration: {
+      'pipeline.configuration_fqn': configurationFqn,
+      'pipeline.watermark_fqn': watermarkFqn,
+      'pipeline.ingestion_group': ingestionGroup,
+    },
+    libraries: [{ file: { path: `/Workspace${bootstrapWorkspacePath}` } }],
+    environment: { dependencies: [watersyncDependency(gitUrl, gitBranch)] },
+    serverless: true,
+    channel: 'CURRENT',
+  };
+
+  if (existingPipelineId) {
+    await workspace.pipelines.update({ pipeline_id: existingPipelineId, ...pipelineSettings });
+    return existingPipelineId;
+  }
+  const created = await workspace.pipelines.create(pipelineSettings);
+  if (!created.pipeline_id) throw new Error('Databricks created the CDC pipeline without returning an ID');
+  return created.pipeline_id;
 }
 
 const handleError = (res: { status(code: number): { json(value: unknown): void } }, error: unknown) => {
@@ -281,9 +356,21 @@ await createApp({
       app.post('/api/jobs', async (req, res) => {
         try {
           const body = jobPayloadSchema.parse(req.body);
-          const includeCdcPipeline =
-            Boolean(body.cdcPipelineId) &&
-            (await groupHasEnabledIncrementalSource(body.catalog, body.schema, body.ingestionGroup));
+          const hasIncrementalSources = await groupHasEnabledIncrementalSource(
+            body.catalog,
+            body.schema,
+            body.ingestionGroup
+          );
+          const cdcPipelineId = hasIncrementalSources
+            ? await ensureCdcPipeline({
+                pipelineId: body.cdcPipelineId,
+                catalog: body.catalog,
+                schema: body.schema,
+                ingestionGroup: body.ingestionGroup,
+                gitUrl: body.gitUrl,
+                gitBranch: body.gitBranch,
+              })
+            : undefined;
           const name = `[${body.ingestionGroup}] Ingestion Pipeline`;
           const configurationFqn = `${body.catalog}.${body.schema}.jdbc_ingestion_config`;
           const watermarkFqn = `${body.catalog}.${body.schema}.jdbc_ingestion_watermark`;
@@ -321,11 +408,11 @@ await createApp({
               },
             },
           ];
-          if (includeCdcPipeline && body.cdcPipelineId) {
+          if (cdcPipelineId) {
             tasks.push({
               task_key: 'cdc_scd2_pipeline',
               depends_on: [{ task_key: 'ingestion_worker' }],
-              pipeline_task: { pipeline_id: body.cdcPipelineId, full_refresh: false },
+              pipeline_task: { pipeline_id: cdcPipelineId, full_refresh: false },
             });
           }
           const settings: jobs.JobSettings = {
@@ -384,10 +471,10 @@ await createApp({
           }
           if (existing[0]?.job_id) {
             await workspace.jobs.reset({ job_id: existing[0].job_id, new_settings: settings });
-            res.json({ jobId: existing[0].job_id, action: 'updated' });
+            res.json({ jobId: existing[0].job_id, pipelineId: cdcPipelineId, action: 'updated' });
           } else {
             const created = await workspace.jobs.create(settings as jobs.CreateJob);
-            res.json({ jobId: created.job_id, action: 'created' });
+            res.json({ jobId: created.job_id, pipelineId: cdcPipelineId, action: 'created' });
           }
         } catch (error) {
           handleError(res, error);

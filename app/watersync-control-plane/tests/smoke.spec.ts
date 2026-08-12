@@ -31,7 +31,7 @@ test('jobs screen exposes the guided creation form', async ({ page }) => {
   await expect(page.getByLabel('GitHub repository URL')).toBeVisible();
   await expect(page.getByLabel('Branch')).toBeVisible();
   await expect(page.getByText('watersync @ git+https://github.com/erinaldidb/watersync.git@main')).toBeVisible();
-  await expect(page.getByLabel('CDC pipeline ID (optional)')).toBeDisabled();
+  await expect(page.getByLabel('Existing CDC pipeline ID (optional)')).toBeDisabled();
 });
 
 test('jobs screen exposes run monitoring and workspace navigation', async ({ page }) => {

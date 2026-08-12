@@ -1344,13 +1344,13 @@ function JobDialog({
                   />
                 </div>
                 <div className="space-y-2 md:col-span-2">
-                  <Label htmlFor="pipeline-id">CDC pipeline ID (optional)</Label>
+                  <Label htmlFor="pipeline-id">Existing CDC pipeline ID (optional)</Label>
                   <Input
                     id="pipeline-id"
                     name="cdcPipelineId"
                     placeholder={
                       selectedGroup?.enabled_incremental_source_count
-                        ? 'Adds the CDC task when provided'
+                        ? 'Leave blank to create or reuse the group CDC pipeline'
                         : 'Not required: this group has no enabled incremental tables'
                     }
                     disabled={!selectedGroup?.enabled_incremental_source_count}
@@ -1358,6 +1358,11 @@ function JobDialog({
                   {!selectedGroup?.enabled_incremental_source_count && (
                     <p className="text-xs text-muted-foreground">
                       The CDC declarative pipeline task will be omitted for this ingestion group.
+                    </p>
+                  )}
+                  {Boolean(selectedGroup?.enabled_incremental_source_count) && (
+                    <p className="text-xs text-muted-foreground">
+                      When blank, WaterSync automatically provisions a serverless CDC SCD2 pipeline for this group.
                     </p>
                   )}
                 </div>
