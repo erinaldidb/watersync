@@ -186,8 +186,42 @@ await createApp({
 
       app.get('/api/jobs', async (_req, res) => {
         try {
+          const visibleJobs = [];
+          for await (const job of workspace.jobs.list({ limit: 100, expand_tasks: false })) visibleJobs.push(job);
+          const workspaceUrl = requiredEnv('DATABRICKS_HOST').replace(/\/$/, '');
           const result = [];
-          for await (const job of workspace.jobs.list({ limit: 100, expand_tasks: false })) result.push(job);
+          for (let offset = 0; offset < visibleJobs.length; offset += 8) {
+            const batch = visibleJobs.slice(offset, offset + 8);
+            const summaries = await Promise.all(
+              batch.map(async (job) => {
+                const recentRuns = [];
+                if (job.job_id) {
+                  for await (const run of workspace.jobs.listRuns({
+                    job_id: job.job_id,
+                    limit: 10,
+                    expand_tasks: false,
+                  })) {
+                    recentRuns.push({
+                      run_id: run.run_id,
+                      run_name: run.run_name,
+                      start_time: run.start_time,
+                      end_time: run.end_time,
+                      setup_duration: run.setup_duration,
+                      execution_duration: run.execution_duration,
+                      cleanup_duration: run.cleanup_duration,
+                      state: run.state,
+                    });
+                  }
+                }
+                return {
+                  ...job,
+                  workspace_url: job.job_id ? `${workspaceUrl}/jobs/${job.job_id}` : workspaceUrl,
+                  runs: recentRuns,
+                };
+              })
+            );
+            result.push(...summaries);
+          }
           res.json({ jobs: result });
         } catch (error) {
           handleError(res, error);

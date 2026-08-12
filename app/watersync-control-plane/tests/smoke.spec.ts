@@ -29,3 +29,9 @@ test('jobs screen exposes the guided creation form', async ({ page }) => {
   await expect(page.getByLabel('GitHub repository URL')).toBeVisible();
   await expect(page.getByLabel('Branch')).toBeVisible();
 });
+
+test('jobs screen exposes run monitoring and workspace navigation', async ({ page }) => {
+  await page.goto('/jobs');
+  await expect(page.getByText('Last 10 runs').first()).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Open in Databricks' }).first()).toBeVisible();
+});

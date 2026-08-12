@@ -51,6 +51,7 @@ import {
   Clock3,
   Database,
   Droplets,
+  ExternalLink,
   Layers3,
   Play,
   Plus,
@@ -96,7 +97,24 @@ type WatermarkRow = {
   status: string | null;
   last_error: string | null;
 };
-type JobRow = { job_id?: number; settings?: { name?: string }; creator_user_name?: string; created_time?: number };
+type JobRun = {
+  run_id?: number;
+  run_name?: string;
+  start_time?: number;
+  end_time?: number;
+  setup_duration?: number;
+  execution_duration?: number;
+  cleanup_duration?: number;
+  state?: { life_cycle_state?: string; result_state?: string; state_message?: string };
+};
+type JobRow = {
+  job_id?: number;
+  settings?: { name?: string };
+  creator_user_name?: string;
+  created_time?: number;
+  workspace_url?: string;
+  runs: JobRun[];
+};
 
 const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...init });
@@ -139,6 +157,22 @@ const savedLocation = (): Location => {
 const fqn = (location: Location, table: string) => `${location.catalog}.${location.schema}.${table}`;
 const displayTime = (value: string | number | null | undefined) =>
   value ? new Date(typeof value === 'number' ? value : value).toLocaleString() : 'Never';
+const runStatus = (run?: JobRun) => run?.state?.result_state ?? run?.state?.life_cycle_state ?? 'NEVER_RUN';
+const statusVariant = (status: string): 'default' | 'secondary' | 'destructive' | 'outline' => {
+  if (status === 'SUCCESS') return 'default';
+  if (['FAILED', 'TIMEDOUT', 'CANCELED', 'INTERNAL_ERROR'].includes(status)) return 'destructive';
+  if (['RUNNING', 'PENDING', 'QUEUED', 'TERMINATING'].includes(status)) return 'secondary';
+  return 'outline';
+};
+const runDuration = (run: JobRun) => {
+  const duration =
+    run.end_time && run.start_time
+      ? run.end_time - run.start_time
+      : (run.setup_duration ?? 0) + (run.execution_duration ?? 0) + (run.cleanup_duration ?? 0);
+  if (!duration) return 'Duration unavailable';
+  if (duration < 60_000) return `${Math.max(1, Math.round(duration / 1000))}s`;
+  return `${Math.floor(duration / 60_000)}m ${Math.round((duration % 60_000) / 1000)}s`;
+};
 
 function Layout() {
   const [location, setLocationState] = useState<Location>(savedLocation);
@@ -925,6 +959,7 @@ function JobsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
+  const [runningJob, setRunningJob] = useState<number | null>(null);
   const groupParams = useMemo(
     () => ({
       table_name: sql.string(fqn(location, 'jdbc_ingestion_config')),
@@ -939,6 +974,7 @@ function JobsPage() {
   } = useAnalyticsQuery('ingestion_groups', groupParams);
   const load = () => {
     setLoading(true);
+    setError(null);
     api<{ jobs: JobRow[] }>('/api/jobs')
       .then((x) => setJobs(x.jobs))
       .catch((e) => setError(errorMessage(e)))
@@ -949,18 +985,22 @@ function JobsPage() {
     return () => window.clearTimeout(timer);
   }, []);
   const run = async (id: number) => {
+    setRunningJob(id);
     try {
       const x = await api<{ runId: number }>(`/api/jobs/${id}/run`, { method: 'POST' });
       alert(`Run ${x.runId} started`);
+      load();
     } catch (e) {
       setError(errorMessage(e));
+    } finally {
+      setRunningJob(null);
     }
   };
   return (
     <>
       <PageTitle
         title="WaterSync Lakeflow Jobs"
-        description="Create one managed job per configured ingestion group, then trigger runs."
+        description="Monitor recent run health, trigger ingestion, or open the full job in Databricks."
         action={
           <Button onClick={() => setOpen(true)}>
             <Plus className="mr-2 h-4 w-4" />
@@ -983,7 +1023,7 @@ function JobsPage() {
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
           {jobs.map((job) => (
-            <Card key={job.job_id}>
+            <Card key={job.job_id} className="job-card">
               <CardHeader>
                 <div className="flex justify-between gap-4">
                   <div>
@@ -992,19 +1032,56 @@ function JobsPage() {
                       ID {job.job_id} · created {displayTime(job.created_time)}
                     </CardDescription>
                   </div>
-                  <Badge variant="outline">Lakeflow Job</Badge>
+                  <Badge variant={statusVariant(runStatus(job.runs[0]))}>{runStatus(job.runs[0]).replaceAll('_', ' ')}</Badge>
                 </div>
               </CardHeader>
-              <CardContent className="flex gap-2">
-                <Button
-                  disabled={!job.job_id}
-                  onClick={() => {
-                    if (job.job_id) void run(job.job_id);
-                  }}
-                >
-                  <Play className="mr-2 h-4 w-4" />
-                  Run now
-                </Button>
+              <CardContent className="space-y-5">
+                <div>
+                  <div className="mb-2 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                    <span className="font-medium text-foreground">Last 10 runs</span>
+                    <span>Newest on the right</span>
+                  </div>
+                  {job.runs.length ? (
+                    <div className="run-timeline" aria-label={`Recent run status for ${job.settings?.name ?? `job ${job.job_id}`}`}>
+                      {[...job.runs].reverse().map((recentRun) => {
+                        const status = runStatus(recentRun);
+                        const label = `${status.replaceAll('_', ' ')} · ${displayTime(recentRun.start_time)} · ${runDuration(recentRun)}`;
+                        return (
+                          <div
+                            key={recentRun.run_id}
+                            className={`run-mark run-mark-${status.toLowerCase()}`}
+                            title={label}
+                            aria-label={label}
+                          >
+                            <span>{status === 'SUCCESS' ? '✓' : status === 'RUNNING' ? '…' : '!'}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">No runs recorded yet.</p>
+                  )}
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Latest: {job.runs[0] ? `${displayTime(job.runs[0].start_time)} · ${runDuration(job.runs[0])}` : 'Never run'}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    disabled={!job.job_id || runningJob === job.job_id}
+                    onClick={() => {
+                      if (job.job_id) void run(job.job_id);
+                    }}
+                  >
+                    <Play className="mr-2 h-4 w-4" />
+                    {runningJob === job.job_id ? 'Starting…' : 'Run now'}
+                  </Button>
+                  <Button variant="outline" asChild>
+                    <a href={job.workspace_url} target="_blank" rel="noreferrer">
+                      Open in Databricks
+                      <ExternalLink className="ml-2 h-4 w-4" />
+                    </a>
+                  </Button>
+                </div>
               </CardContent>
             </Card>
           ))}
