@@ -242,13 +242,17 @@ body {
   background: color-mix(in oklch, var(--destructive) 14%, var(--card));
   color: var(--destructive);
 }
-.run-mark-running,
 .run-mark-pending,
 .run-mark-queued,
 .run-mark-terminating {
   border-color: color-mix(in oklch, var(--primary) 50%, var(--border));
   background: color-mix(in oklch, var(--primary) 12%, var(--card));
   color: var(--primary);
+}
+.run-mark-running {
+  border-color: color-mix(in oklch, var(--success) 55%, var(--border));
+  background: color-mix(in oklch, var(--success) 18%, var(--card));
+  color: var(--success);
 }
 
 tbody tr {
