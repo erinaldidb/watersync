@@ -44,7 +44,7 @@ const jobPayloadSchema = locationSchema.extend({
   gitUrl: z.url().refine((value) => new URL(value).hostname === 'github.com', 'Repository must be hosted on GitHub'),
   gitBranch: z.string().trim().min(1),
   foreachConcurrency: z.number().int().min(1).max(100),
-  cdcPipelineId: z.string().trim().optional(),
+  cdcPipelineId: z.string().trim().nullable().optional(),
   schedule: scheduleSchema,
 });
 const jobSchedulePayloadSchema = scheduleSchema.extend({ jobId: z.number().int().positive() });
@@ -85,6 +85,16 @@ async function execute(statement: string, parameters: dbsql.StatementParameterLi
     );
   }
   return response;
+}
+
+async function groupHasEnabledIncrementalSource(catalog: string, schema: string, ingestionGroup: string) {
+  const response = await execute(
+    `SELECT count_if(coalesce(enabled, true) AND lower(ingestion_type) = 'incremental') > 0
+     FROM ${tableName(catalog, schema, 'jdbc_ingestion_config')}
+     WHERE ingestion_group = :ingestion_group`,
+    [parameter('ingestion_group', ingestionGroup)]
+  );
+  return response.result?.data_array?.[0]?.[0]?.toLowerCase() === 'true';
 }
 
 const handleError = (res: { status(code: number): { json(value: unknown): void } }, error: unknown) => {
@@ -244,6 +254,9 @@ await createApp({
       app.post('/api/jobs', async (req, res) => {
         try {
           const body = jobPayloadSchema.parse(req.body);
+          const includeCdcPipeline =
+            Boolean(body.cdcPipelineId) &&
+            (await groupHasEnabledIncrementalSource(body.catalog, body.schema, body.ingestionGroup));
           const name = `[${body.ingestionGroup}] Ingestion Pipeline`;
           const configurationFqn = `${body.catalog}.${body.schema}.jdbc_ingestion_config`;
           const watermarkFqn = `${body.catalog}.${body.schema}.jdbc_ingestion_watermark`;
@@ -269,7 +282,7 @@ await createApp({
               },
             },
           ];
-          if (body.cdcPipelineId) {
+          if (includeCdcPipeline && body.cdcPipelineId) {
             tasks.push({
               task_key: 'cdc_scd2_pipeline',
               depends_on: [{ task_key: 'ingestion_worker' }],

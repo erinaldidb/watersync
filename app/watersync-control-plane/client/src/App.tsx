@@ -1159,7 +1159,12 @@ function JobDialog({
   open: boolean;
   onOpenChange: (v: boolean) => void;
   location: Location;
-  groups: Array<{ ingestion_group: string; source_count: number; enabled_source_count: number }>;
+  groups: Array<{
+    ingestion_group: string;
+    source_count: number;
+    enabled_source_count: number;
+    enabled_incremental_source_count: number;
+  }>;
   groupsLoading: boolean;
   groupsError: string | null;
   onSaved: () => void;
@@ -1187,7 +1192,7 @@ function JobDialog({
           gitUrl: form.get('gitUrl'),
           gitBranch: form.get('gitBranch'),
           foreachConcurrency: Number(form.get('foreachConcurrency')),
-          cdcPipelineId: form.get('cdcPipelineId'),
+          cdcPipelineId: selectedGroup?.enabled_incremental_source_count ? form.get('cdcPipelineId') : null,
           schedule: {
             enabled: scheduleEnabled,
             quartzCronExpression: formString(form, 'quartzCronExpression', '0 0 8 * * ?'),
@@ -1310,7 +1315,21 @@ function JobDialog({
                 </div>
                 <div className="space-y-2 md:col-span-2">
                   <Label htmlFor="pipeline-id">CDC pipeline ID (optional)</Label>
-                  <Input id="pipeline-id" name="cdcPipelineId" placeholder="Adds the CDC task when provided" />
+                  <Input
+                    id="pipeline-id"
+                    name="cdcPipelineId"
+                    placeholder={
+                      selectedGroup?.enabled_incremental_source_count
+                        ? 'Adds the CDC task when provided'
+                        : 'Not required: this group has no enabled incremental tables'
+                    }
+                    disabled={!selectedGroup?.enabled_incremental_source_count}
+                  />
+                  {!selectedGroup?.enabled_incremental_source_count && (
+                    <p className="text-xs text-muted-foreground">
+                      The CDC declarative pipeline task will be omitted for this ingestion group.
+                    </p>
+                  )}
                 </div>
               </div>
             </TabsContent>
