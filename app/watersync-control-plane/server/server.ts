@@ -39,6 +39,29 @@ const scheduleSchema = z.object({
   timezoneId: z.string().trim().min(1),
   pauseStatus: z.enum(['PAUSED', 'UNPAUSED']),
 });
+const computeSchema = z
+  .object({
+    mode: z.enum(['SERVERLESS', 'JOB_CLUSTER']),
+    performanceTarget: z.enum(['STANDARD', 'PERFORMANCE_OPTIMIZED']),
+    sparkVersion: z.string().trim(),
+    driverNodeTypeId: z.string().trim(),
+    workerNodeTypeId: z.string().trim(),
+    minWorkers: z.number().int().min(0),
+    maxWorkers: z.number().int().min(1),
+  })
+  .superRefine((value, context) => {
+    if (value.mode !== 'JOB_CLUSTER') return;
+    for (const [field, fieldValue] of [
+      ['sparkVersion', value.sparkVersion],
+      ['driverNodeTypeId', value.driverNodeTypeId],
+      ['workerNodeTypeId', value.workerNodeTypeId],
+    ] as const) {
+      if (!fieldValue) context.addIssue({ code: 'custom', path: [field], message: 'Required for a job cluster' });
+    }
+    if (value.maxWorkers < value.minWorkers) {
+      context.addIssue({ code: 'custom', path: ['maxWorkers'], message: 'Maximum workers must be at least the minimum' });
+    }
+  });
 const jobPayloadSchema = locationSchema.extend({
   ingestionGroup: z.string().min(1),
   gitUrl: z.url().refine((value) => new URL(value).hostname === 'github.com', 'Repository must be hosted on GitHub'),
@@ -46,6 +69,7 @@ const jobPayloadSchema = locationSchema.extend({
   foreachConcurrency: z.number().int().min(1).max(100),
   cdcPipelineId: z.string().trim().nullable().optional(),
   schedule: scheduleSchema,
+  compute: computeSchema,
 });
 const jobSchedulePayloadSchema = scheduleSchema.extend({ jobId: z.number().int().positive() });
 
@@ -264,12 +288,20 @@ await createApp({
           const configurationFqn = `${body.catalog}.${body.schema}.jdbc_ingestion_config`;
           const watermarkFqn = `${body.catalog}.${body.schema}.jdbc_ingestion_watermark`;
           const environmentKey = 'watersync_environment';
+          const jobClusterKey = 'watersync_cluster';
           const dependency = watersyncDependency(body.gitUrl, body.gitBranch);
+          const taskCompute =
+            body.compute.mode === 'SERVERLESS'
+              ? { environment_key: environmentKey }
+              : {
+                  job_cluster_key: jobClusterKey,
+                  libraries: [{ pypi: { package: dependency } }],
+                };
           const tasks: jobs.Task[] = [
             {
               task_key: 'ingestion_configs',
               notebook_task: { notebook_path: plannerNotebookPath, source: 'GIT' },
-              environment_key: environmentKey,
+              ...taskCompute,
             },
             {
               task_key: 'ingestion_worker',
@@ -279,7 +311,7 @@ await createApp({
                 concurrency: body.foreachConcurrency,
                 task: {
                   task_key: 'ingestion_worker_iteration',
-                  environment_key: environmentKey,
+                  ...taskCompute,
                   notebook_task: {
                     notebook_path: workerNotebookPath,
                     source: 'GIT',
@@ -299,12 +331,32 @@ await createApp({
           const settings: jobs.JobSettings = {
             name,
             max_concurrent_runs: 1,
-            environments: [
-              {
-                environment_key: environmentKey,
-                spec: { environment_version: '4', dependencies: [dependency] },
-              },
-            ],
+            ...(body.compute.mode === 'SERVERLESS'
+              ? {
+                  performance_target: body.compute.performanceTarget,
+                  environments: [
+                    {
+                      environment_key: environmentKey,
+                      spec: { environment_version: '4', dependencies: [dependency] },
+                    },
+                  ],
+                }
+              : {
+                  job_clusters: [
+                    {
+                      job_cluster_key: jobClusterKey,
+                      new_cluster: {
+                        spark_version: body.compute.sparkVersion,
+                        driver_node_type_id: body.compute.driverNodeTypeId,
+                        node_type_id: body.compute.workerNodeTypeId,
+                        autoscale: {
+                          min_workers: body.compute.minWorkers,
+                          max_workers: body.compute.maxWorkers,
+                        },
+                      },
+                    },
+                  ],
+                }),
             parameters: [
               { name: 'configuration_fqn', default: configurationFqn },
               { name: 'watermark_fqn', default: watermarkFqn },

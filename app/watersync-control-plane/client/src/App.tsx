@@ -1176,6 +1176,8 @@ function JobDialog({
   const [scheduleActive, setScheduleActive] = useState(true);
   const [gitUrl, setGitUrl] = useState('https://github.com/erinaldidb/watersync');
   const [gitBranch, setGitBranch] = useState('main');
+  const [computeMode, setComputeMode] = useState<'SERVERLESS' | 'JOB_CLUSTER'>('SERVERLESS');
+  const [performanceTarget, setPerformanceTarget] = useState<'STANDARD' | 'PERFORMANCE_OPTIMIZED'>('STANDARD');
   useEffect(() => {
     if (open && !ingestionGroup && groups[0]) setIngestionGroup(groups[0].ingestion_group);
   }, [open, ingestionGroup, groups]);
@@ -1201,6 +1203,15 @@ function JobDialog({
             timezoneId: formString(form, 'timezoneId', 'America/New_York'),
             pauseStatus: scheduleActive ? 'UNPAUSED' : 'PAUSED',
           },
+          compute: {
+            mode: computeMode,
+            performanceTarget,
+            sparkVersion: formString(form, 'sparkVersion', ''),
+            driverNodeTypeId: formString(form, 'driverNodeTypeId', ''),
+            workerNodeTypeId: formString(form, 'workerNodeTypeId', ''),
+            minWorkers: Number(form.get('minWorkers') ?? 1),
+            maxWorkers: Number(form.get('maxWorkers') ?? 4),
+          },
         }),
       });
       alert(`Job ${result.jobId} ${result.action}`);
@@ -1224,9 +1235,11 @@ function JobDialog({
           {error && <ErrorState message={error} />}
           {groupsError && <ErrorState message={groupsError} />}
           <Tabs defaultValue="job" className="w-full">
-            <TabsList className="grid w-full grid-cols-3">
+            <TabsList className={`grid w-full ${computeMode === 'JOB_CLUSTER' ? 'grid-cols-5' : 'grid-cols-4'}`}>
               <TabsTrigger value="job">Job configuration</TabsTrigger>
               <TabsTrigger value="source">Git source &amp; execution</TabsTrigger>
+              <TabsTrigger value="compute">Compute</TabsTrigger>
+              {computeMode === 'JOB_CLUSTER' && <TabsTrigger value="cluster">Job cluster</TabsTrigger>}
               <TabsTrigger value="schedule">Schedule</TabsTrigger>
             </TabsList>
             <TabsContent value="job" forceMount className="mt-4 space-y-4 data-[state=inactive]:hidden">
@@ -1359,6 +1372,87 @@ function JobDialog({
                 onActiveChange={setScheduleActive}
               />
             </TabsContent>
+            <TabsContent value="compute" forceMount className="mt-4 data-[state=inactive]:hidden">
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="compute-mode">Compute mode</Label>
+                  <Select value={computeMode} onValueChange={(value) => setComputeMode(value as typeof computeMode)}>
+                    <SelectTrigger id="compute-mode" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="SERVERLESS">Serverless</SelectItem>
+                      <SelectItem value="JOB_CLUSTER">Shared autoscaling job cluster</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {computeMode === 'SERVERLESS' && (
+                  <div className="space-y-2">
+                    <Label htmlFor="performance-target">Serverless performance mode</Label>
+                    <Select
+                      value={performanceTarget}
+                      onValueChange={(value) => setPerformanceTarget(value as typeof performanceTarget)}
+                    >
+                      <SelectTrigger id="performance-target" className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="STANDARD">Standard</SelectItem>
+                        <SelectItem value="PERFORMANCE_OPTIMIZED">Performance optimized</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      Standard favors cost efficiency; performance optimized favors faster startup and execution.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </TabsContent>
+            {computeMode === 'JOB_CLUSTER' && (
+              <TabsContent value="cluster" forceMount className="mt-4 data-[state=inactive]:hidden">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2 md:col-span-2">
+                    <Label htmlFor="spark-version">Databricks Runtime</Label>
+                    <Input
+                      id="spark-version"
+                      name="sparkVersion"
+                      defaultValue="16.4.x-scala2.12"
+                      placeholder="16.4.x-scala2.12"
+                      required
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="driver-node-type">Driver node type</Label>
+                    <Input
+                      id="driver-node-type"
+                      name="driverNodeTypeId"
+                      placeholder="For example: i3.xlarge"
+                      required
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="worker-node-type">Worker node type</Label>
+                    <Input
+                      id="worker-node-type"
+                      name="workerNodeTypeId"
+                      placeholder="For example: i3.xlarge"
+                      required
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="min-workers">Minimum workers</Label>
+                    <Input id="min-workers" name="minWorkers" type="number" min="0" defaultValue="1" required />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="max-workers">Maximum workers</Label>
+                    <Input id="max-workers" name="maxWorkers" type="number" min="1" defaultValue="4" required />
+                  </div>
+                  <p className="text-xs text-muted-foreground md:col-span-2">
+                    The planner and ingestion workers share this autoscaling job cluster. The CDC pipeline task uses its own pipeline compute.
+                  </p>
+                </div>
+              </TabsContent>
+            )}
           </Tabs>
           <p className="text-xs text-muted-foreground">
             If a job with the generated name already exists, its definition is updated in place.

@@ -26,6 +26,7 @@ test('jobs screen exposes the guided creation form', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Create or update a WaterSync job' })).toBeVisible();
   await expect(page.getByRole('tab', { name: 'Job configuration' })).toBeVisible();
   await expect(page.getByRole('tab', { name: 'Schedule' })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Compute' })).toBeVisible();
   await page.getByRole('tab', { name: 'Git source & execution' }).click();
   await expect(page.getByLabel('GitHub repository URL')).toBeVisible();
   await expect(page.getByLabel('Branch')).toBeVisible();
