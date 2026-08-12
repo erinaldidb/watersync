@@ -188,7 +188,8 @@ await createApp({
         try {
           const visibleJobs = [];
           for await (const job of workspace.jobs.list({ limit: 100, expand_tasks: false })) visibleJobs.push(job);
-          const workspaceUrl = requiredEnv('DATABRICKS_HOST').replace(/\/$/, '');
+          const workspaceHost = requiredEnv('DATABRICKS_HOST').replace(/\/$/, '');
+          const workspaceUrl = /^https?:\/\//i.test(workspaceHost) ? workspaceHost : `https://${workspaceHost}`;
           const result = [];
           for (let offset = 0; offset < visibleJobs.length; offset += 8) {
             const batch = visibleJobs.slice(offset, offset + 8);
