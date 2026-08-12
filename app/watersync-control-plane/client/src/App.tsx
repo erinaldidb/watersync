@@ -107,9 +107,17 @@ type JobRun = {
   cleanup_duration?: number;
   state?: { life_cycle_state?: string; result_state?: string; state_message?: string };
 };
+type JobSchedule = {
+  quartz_cron_expression: string;
+  timezone_id: string;
+  pause_status?: 'PAUSED' | 'UNPAUSED';
+};
 type JobRow = {
   job_id?: number;
-  settings?: { name?: string };
+  settings?: {
+    name?: string;
+    schedule?: JobSchedule;
+  };
   creator_user_name?: string;
   created_time?: number;
   workspace_url?: string;
@@ -129,6 +137,10 @@ const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   return body as T;
 };
 const errorMessage = (value: unknown) => (value instanceof Error ? value.message : 'Unexpected error');
+const formString = (form: FormData, name: string, fallback: string) => {
+  const value = form.get(name);
+  return typeof value === 'string' && value ? value : fallback;
+};
 const defaultLocation: Location = {
   catalog: 'serverless_pixels_release_catalog',
   schema: 'jdbc_incremental_gh',
@@ -960,6 +972,7 @@ function JobsPage() {
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [runningJob, setRunningJob] = useState<number | null>(null);
+  const [scheduleJob, setScheduleJob] = useState<JobRow | null>(null);
   const groupParams = useMemo(
     () => ({
       table_name: sql.string(fqn(location, 'jdbc_ingestion_config')),
@@ -1036,6 +1049,26 @@ function JobsPage() {
                 </div>
               </CardHeader>
               <CardContent className="space-y-5">
+                <div className="rounded-md border bg-muted/30 p-3">
+                  <div className="mb-1 flex items-center justify-between gap-3">
+                    <span className="text-sm font-medium">Schedule</span>
+                    <Badge variant={job.settings?.schedule?.pause_status === 'UNPAUSED' ? 'secondary' : 'outline'}>
+                      {!job.settings?.schedule
+                        ? 'Manual only'
+                        : job.settings.schedule.pause_status === 'UNPAUSED'
+                          ? 'Active'
+                          : 'Paused'}
+                    </Badge>
+                  </div>
+                  {job.settings?.schedule ? (
+                    <div className="space-y-1 text-xs text-muted-foreground">
+                      <div className="font-mono text-foreground">{job.settings.schedule.quartz_cron_expression}</div>
+                      <div>{job.settings.schedule.timezone_id}</div>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">Runs only when manually triggered.</p>
+                  )}
+                </div>
                 <div>
                   <div className="mb-2 flex items-center justify-between gap-3 text-xs text-muted-foreground">
                     <span className="font-medium text-foreground">Last 10 runs</span>
@@ -1081,6 +1114,10 @@ function JobsPage() {
                       <ExternalLink className="ml-2 h-4 w-4" />
                     </a>
                   </Button>
+                  <Button variant="outline" onClick={() => setScheduleJob(job)} disabled={!job.job_id}>
+                    <Clock3 className="mr-2 h-4 w-4" />
+                    Edit schedule
+                  </Button>
                 </div>
               </CardContent>
             </Card>
@@ -1096,6 +1133,14 @@ function JobsPage() {
         groupsError={groupsError}
         onSaved={() => {
           setOpen(false);
+          load();
+        }}
+      />
+      <ScheduleDialog
+        job={scheduleJob}
+        onClose={() => setScheduleJob(null)}
+        onSaved={() => {
+          setScheduleJob(null);
           load();
         }}
       />
@@ -1122,6 +1167,8 @@ function JobDialog({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [ingestionGroup, setIngestionGroup] = useState('');
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [scheduleActive, setScheduleActive] = useState(true);
   useEffect(() => {
     if (open && !ingestionGroup && groups[0]) setIngestionGroup(groups[0].ingestion_group);
   }, [open, ingestionGroup, groups]);
@@ -1141,6 +1188,12 @@ function JobDialog({
           gitBranch: form.get('gitBranch'),
           foreachConcurrency: Number(form.get('foreachConcurrency')),
           cdcPipelineId: form.get('cdcPipelineId'),
+          schedule: {
+            enabled: scheduleEnabled,
+            quartzCronExpression: formString(form, 'quartzCronExpression', '0 0 8 * * ?'),
+            timezoneId: formString(form, 'timezoneId', 'America/New_York'),
+            pauseStatus: scheduleActive ? 'UNPAUSED' : 'PAUSED',
+          },
         }),
       });
       alert(`Job ${result.jobId} ${result.action}`);
@@ -1164,9 +1217,10 @@ function JobDialog({
           {error && <ErrorState message={error} />}
           {groupsError && <ErrorState message={groupsError} />}
           <Tabs defaultValue="job" className="w-full">
-            <TabsList className="grid w-full grid-cols-2">
+            <TabsList className="grid w-full grid-cols-3">
               <TabsTrigger value="job">Job configuration</TabsTrigger>
               <TabsTrigger value="source">Git source &amp; execution</TabsTrigger>
+              <TabsTrigger value="schedule">Schedule</TabsTrigger>
             </TabsList>
             <TabsContent value="job" forceMount className="mt-4 space-y-4 data-[state=inactive]:hidden">
               <div className="space-y-2">
@@ -1260,6 +1314,14 @@ function JobDialog({
                 </div>
               </div>
             </TabsContent>
+            <TabsContent value="schedule" forceMount className="mt-4 data-[state=inactive]:hidden">
+              <ScheduleFields
+                enabled={scheduleEnabled}
+                onEnabledChange={setScheduleEnabled}
+                active={scheduleActive}
+                onActiveChange={setScheduleActive}
+              />
+            </TabsContent>
           </Tabs>
           <p className="text-xs text-muted-foreground">
             If a job with the generated name already exists, its definition is updated in place.
@@ -1267,6 +1329,131 @@ function JobDialog({
           <DialogFooter>
             <Button type="submit" disabled={busy || !ingestionGroup || groupsLoading}>
               {busy ? 'Saving…' : 'Create or update job'}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ScheduleFields({
+  enabled,
+  onEnabledChange,
+  active,
+  onActiveChange,
+  schedule,
+}: {
+  enabled: boolean;
+  onEnabledChange: (value: boolean) => void;
+  active: boolean;
+  onActiveChange: (value: boolean) => void;
+  schedule?: JobSchedule;
+}) {
+  return (
+    <div className="space-y-4">
+      <label className="flex items-center justify-between gap-4 rounded-md border p-3 text-sm">
+        <span>
+          <span className="block font-medium">Scheduled execution</span>
+          <span className="text-xs text-muted-foreground">Run automatically using a Quartz cron schedule.</span>
+        </span>
+        <Switch checked={enabled} onCheckedChange={onEnabledChange} aria-label="Scheduled execution" />
+      </label>
+      <div className="grid gap-4 md:grid-cols-2">
+        <div className="space-y-2 md:col-span-2">
+          <Label htmlFor="quartz-cron">Quartz cron expression</Label>
+          <Input
+            id="quartz-cron"
+            name="quartzCronExpression"
+            defaultValue={schedule?.quartz_cron_expression ?? '0 0 8 * * ?'}
+            placeholder="0 0 8 * * ?"
+            required
+            disabled={!enabled}
+          />
+          <p className="text-xs text-muted-foreground">Seconds, minutes, hours, day of month, month, day of week.</p>
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="schedule-timezone">Timezone</Label>
+          <Input
+            id="schedule-timezone"
+            name="timezoneId"
+            defaultValue={schedule?.timezone_id ?? 'America/New_York'}
+            placeholder="America/New_York"
+            required
+            disabled={!enabled}
+          />
+        </div>
+        <label className="flex items-center justify-between gap-4 rounded-md border p-3 text-sm">
+          <span>
+            <span className="block font-medium">Schedule active</span>
+            <span className="text-xs text-muted-foreground">Turn off to save the schedule in a paused state.</span>
+          </span>
+          <Switch
+            checked={active}
+            onCheckedChange={onActiveChange}
+            aria-label="Schedule active"
+            disabled={!enabled}
+          />
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function ScheduleDialog({ job, onClose, onSaved }: { job: JobRow | null; onClose: () => void; onSaved: () => void }) {
+  const schedule = job?.settings?.schedule;
+  const [enabled, setEnabled] = useState(false);
+  const [active, setActive] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    setEnabled(Boolean(schedule));
+    setActive(schedule?.pause_status !== 'PAUSED');
+    setError(null);
+  }, [job, schedule]);
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!job?.job_id) return;
+    const form = new FormData(event.currentTarget);
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/api/jobs/${job.job_id}/schedule`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          enabled,
+          quartzCronExpression: formString(form, 'quartzCronExpression', '0 0 8 * * ?'),
+          timezoneId: formString(form, 'timezoneId', 'America/New_York'),
+          pauseStatus: active ? 'UNPAUSED' : 'PAUSED',
+        }),
+      });
+      onSaved();
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog open={Boolean(job)} onOpenChange={(value) => !value && onClose()}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Edit job schedule</DialogTitle>
+          <DialogDescription>{job?.settings?.name ?? `Job ${job?.job_id}`}</DialogDescription>
+        </DialogHeader>
+        <form onSubmit={(event) => void submit(event)} className="space-y-4">
+          {error && <ErrorState message={error} />}
+          <ScheduleFields
+            key={`${job?.job_id}-${schedule?.quartz_cron_expression ?? 'manual'}`}
+            enabled={enabled}
+            onEnabledChange={setEnabled}
+            active={active}
+            onActiveChange={setActive}
+            schedule={schedule}
+          />
+          <DialogFooter>
+            <Button type="submit" disabled={busy}>
+              {busy ? 'Saving…' : enabled ? 'Save schedule' : 'Remove schedule'}
             </Button>
           </DialogFooter>
         </form>

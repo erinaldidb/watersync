@@ -29,13 +29,25 @@ const configSchema = locationSchema.extend({
 });
 const keySchema = locationSchema.extend({ ingestionGroup: z.string().min(1), sourceTableName: z.string().min(1) });
 const watermarkSchema = keySchema.extend({ lastWatermark: z.string().nullable(), status: z.string().min(1) });
+const cronExpression = z
+  .string()
+  .trim()
+  .refine((value) => value.split(/\s+/).length >= 6, 'Use a Quartz cron expression with at least 6 fields');
+const scheduleSchema = z.object({
+  enabled: z.boolean(),
+  quartzCronExpression: cronExpression,
+  timezoneId: z.string().trim().min(1),
+  pauseStatus: z.enum(['PAUSED', 'UNPAUSED']),
+});
 const jobPayloadSchema = locationSchema.extend({
   ingestionGroup: z.string().min(1),
   gitUrl: z.url().refine((value) => new URL(value).hostname === 'github.com', 'Repository must be hosted on GitHub'),
   gitBranch: z.string().trim().min(1),
   foreachConcurrency: z.number().int().min(1).max(100),
   cdcPipelineId: z.string().trim().optional(),
+  schedule: scheduleSchema,
 });
+const jobSchedulePayloadSchema = scheduleSchema.extend({ jobId: z.number().int().positive() });
 
 const plannerNotebookPath = 'notebooks/Task - Plan Configs';
 const workerNotebookPath = 'notebooks/Task - Run Ingestion';
@@ -278,6 +290,15 @@ await createApp({
               git_provider: 'gitHub',
               git_branch: body.gitBranch,
             },
+            ...(body.schedule.enabled
+              ? {
+                  schedule: {
+                    quartz_cron_expression: body.schedule.quartzCronExpression,
+                    timezone_id: body.schedule.timezoneId,
+                    pause_status: body.schedule.pauseStatus,
+                  },
+                }
+              : {}),
           };
           const existing = [];
           for await (const job of workspace.jobs.list({ name, limit: 25, expand_tasks: false })) {
@@ -300,6 +321,32 @@ await createApp({
           const jobId = z.coerce.number().int().positive().parse(req.params.jobId);
           const run = await workspace.jobs.runNow({ job_id: jobId });
           res.json({ runId: run.run_id });
+        } catch (error) {
+          handleError(res, error);
+        }
+      });
+
+      app.patch('/api/jobs/:jobId/schedule', async (req, res) => {
+        try {
+          const body = jobSchedulePayloadSchema.parse({
+            ...req.body,
+            jobId: z.coerce.number().parse(req.params.jobId),
+          });
+          if (body.enabled) {
+            await workspace.jobs.update({
+              job_id: body.jobId,
+              new_settings: {
+                schedule: {
+                  quartz_cron_expression: body.quartzCronExpression,
+                  timezone_id: body.timezoneId,
+                  pause_status: body.pauseStatus,
+                },
+              },
+            });
+          } else {
+            await workspace.jobs.update({ job_id: body.jobId, fields_to_remove: ['schedule'] });
+          }
+          res.json({ ok: true });
         } catch (error) {
           handleError(res, error);
         }
