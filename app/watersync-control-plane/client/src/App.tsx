@@ -1090,7 +1090,11 @@ function JobsPage() {
                             title={label}
                             aria-label={label}
                           >
-                            <span>{status === 'SUCCESS' ? '✓' : status === 'RUNNING' ? '…' : '!'}</span>
+                            {status === 'RUNNING' ? (
+                              <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
+                            ) : (
+                              <span>{status === 'SUCCESS' ? '✓' : '!'}</span>
+                            )}
                           </div>
                         );
                       })}
