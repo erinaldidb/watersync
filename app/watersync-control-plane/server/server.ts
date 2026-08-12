@@ -77,7 +77,7 @@ const plannerNotebookPath = 'notebooks/Task - Plan Configs';
 const workerNotebookPath = 'notebooks/Task - Run Ingestion';
 
 const watersyncDependency = (gitUrl: string, gitBranch: string) =>
-  `watersync @ git+${gitUrl.replace(/\.git$/, '')}.git@${gitBranch}`;
+  `watersync@git+${gitUrl.replace(/\.git$/, '')}.git@${gitBranch}`;
 
 const workspace = new WorkspaceClient({});
 const requiredEnv = (name: string) => {

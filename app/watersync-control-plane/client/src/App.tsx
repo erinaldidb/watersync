@@ -1373,7 +1373,7 @@ function JobDialog({
                 <div className="space-y-2 md:col-span-2">
                   <Label>Task library</Label>
                   <div className="break-all rounded-md border bg-muted/30 p-3 font-mono text-xs">
-                    watersync @ git+{gitUrl.replace(/\.git$/, '')}.git@{gitBranch || 'main'}
+                    watersync@git+{gitUrl.replace(/\.git$/, '')}.git@{gitBranch || 'main'}
                   </div>
                   <p className="text-xs text-muted-foreground">
                     Installed on the planner and every ingestion worker task from the selected branch.
