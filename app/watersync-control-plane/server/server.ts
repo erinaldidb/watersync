@@ -85,6 +85,10 @@ const requiredEnv = (name: string) => {
   if (!value) throw new Error(`${name} is required`);
   return value;
 };
+const workspaceBaseUrl = () => {
+  const host = requiredEnv('DATABRICKS_HOST').replace(/\/$/, '');
+  return /^https?:\/\//i.test(host) ? host : `https://${host}`;
+};
 const warehouseId = requiredEnv('DATABRICKS_WAREHOUSE_ID');
 
 const tableName = (catalog: string, schema: string, table: string) => `\`${catalog}\`.\`${schema}\`.\`${table}\``;
@@ -312,8 +316,7 @@ await createApp({
         try {
           const visibleJobs = [];
           for await (const job of workspace.jobs.list({ limit: 100, expand_tasks: false })) visibleJobs.push(job);
-          const workspaceHost = requiredEnv('DATABRICKS_HOST').replace(/\/$/, '');
-          const workspaceUrl = /^https?:\/\//i.test(workspaceHost) ? workspaceHost : `https://${workspaceHost}`;
+          const workspaceUrl = workspaceBaseUrl();
           const result = [];
           for (let offset = 0; offset < visibleJobs.length; offset += 8) {
             const batch = visibleJobs.slice(offset, offset + 8);
@@ -328,6 +331,10 @@ await createApp({
                   })) {
                     recentRuns.push({
                       run_id: run.run_id,
+                      run_url:
+                        job.job_id && run.run_id
+                          ? `${workspaceBaseUrl()}/jobs/${job.job_id}/runs/${run.run_id}`
+                          : undefined,
                       run_name: run.run_name,
                       start_time: run.start_time,
                       end_time: run.end_time,

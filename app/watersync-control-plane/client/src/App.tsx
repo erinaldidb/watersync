@@ -99,6 +99,7 @@ type WatermarkRow = {
 };
 type JobRun = {
   run_id?: number;
+  run_url?: string;
   run_name?: string;
   start_time?: number;
   end_time?: number;
@@ -1084,18 +1085,21 @@ function JobsPage() {
                         const status = runStatus(recentRun);
                         const label = `${status.replaceAll('_', ' ')} · ${displayTime(recentRun.start_time)} · ${runDuration(recentRun)}`;
                         return (
-                          <div
+                          <a
                             key={recentRun.run_id}
                             className={`run-mark run-mark-${status.toLowerCase()}`}
                             title={label}
                             aria-label={label}
+                            href={recentRun.run_url}
+                            target="_blank"
+                            rel="noreferrer"
                           >
                             {status === 'RUNNING' ? (
                               <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
                             ) : (
                               <span>{status === 'SUCCESS' ? '✓' : '!'}</span>
                             )}
-                          </div>
+                          </a>
                         );
                       })}
                     </div>
