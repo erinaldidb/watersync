@@ -208,6 +208,53 @@ body {
   color: var(--chart-2);
 }
 
+.job-card {
+  box-shadow: 0 4px 18px color-mix(in oklch, var(--foreground) 5%, transparent);
+}
+.run-timeline {
+  display: grid;
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+  gap: 0.35rem;
+  min-height: 2.75rem;
+  align-items: end;
+}
+.run-mark {
+  display: grid;
+  min-height: 2.25rem;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.run-mark-success {
+  border-color: color-mix(in oklch, var(--success) 55%, var(--border));
+  background: color-mix(in oklch, var(--success) 18%, var(--card));
+  color: var(--success);
+}
+.run-mark-failed,
+.run-mark-timedout,
+.run-mark-canceled,
+.run-mark-internal_error {
+  border-color: color-mix(in oklch, var(--destructive) 55%, var(--border));
+  background: color-mix(in oklch, var(--destructive) 14%, var(--card));
+  color: var(--destructive);
+}
+.run-mark-pending,
+.run-mark-queued,
+.run-mark-terminating {
+  border-color: color-mix(in oklch, var(--primary) 50%, var(--border));
+  background: color-mix(in oklch, var(--primary) 12%, var(--card));
+  color: var(--primary);
+}
+.run-mark-running {
+  border-color: color-mix(in oklch, var(--success) 55%, var(--border));
+  background: color-mix(in oklch, var(--success) 18%, var(--card));
+  color: var(--success);
+}
+
 tbody tr {
   transition: background-color 120ms ease;
 }

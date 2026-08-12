@@ -74,6 +74,7 @@ declare module '@databricks/appkit-ui/react' {
         ingestion_group: string;
         source_count: number;
         enabled_source_count: number;
+        enabled_incremental_source_count: number;
       }>;
     };
   }

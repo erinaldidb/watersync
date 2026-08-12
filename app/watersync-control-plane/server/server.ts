@@ -1,5 +1,5 @@
 import { analytics, createApp, server } from '@databricks/appkit';
-import { WorkspaceClient, jobs, sql as dbsql } from '@databricks/sdk-experimental';
+import { WorkspaceClient, jobs, pipelines, sql as dbsql } from '@databricks/sdk-experimental';
 import { z } from 'zod';
 
 const identifierPart = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
@@ -29,22 +29,65 @@ const configSchema = locationSchema.extend({
 });
 const keySchema = locationSchema.extend({ ingestionGroup: z.string().min(1), sourceTableName: z.string().min(1) });
 const watermarkSchema = keySchema.extend({ lastWatermark: z.string().nullable(), status: z.string().min(1) });
+const cronExpression = z
+  .string()
+  .trim()
+  .refine((value) => value.split(/\s+/).length >= 6, 'Use a Quartz cron expression with at least 6 fields');
+const scheduleSchema = z.object({
+  enabled: z.boolean(),
+  quartzCronExpression: cronExpression,
+  timezoneId: z.string().trim().min(1),
+  pauseStatus: z.enum(['PAUSED', 'UNPAUSED']),
+});
+const computeSchema = z
+  .object({
+    mode: z.enum(['SERVERLESS', 'JOB_CLUSTER']),
+    performanceTarget: z.enum(['STANDARD', 'PERFORMANCE_OPTIMIZED']),
+    sparkVersion: z.string().trim(),
+    driverNodeTypeId: z.string().trim(),
+    workerNodeTypeId: z.string().trim(),
+    minWorkers: z.number().int().min(0),
+    maxWorkers: z.number().int().min(1),
+  })
+  .superRefine((value, context) => {
+    if (value.mode !== 'JOB_CLUSTER') return;
+    for (const [field, fieldValue] of [
+      ['sparkVersion', value.sparkVersion],
+      ['driverNodeTypeId', value.driverNodeTypeId],
+      ['workerNodeTypeId', value.workerNodeTypeId],
+    ] as const) {
+      if (!fieldValue) context.addIssue({ code: 'custom', path: [field], message: 'Required for a job cluster' });
+    }
+    if (value.maxWorkers < value.minWorkers) {
+      context.addIssue({ code: 'custom', path: ['maxWorkers'], message: 'Maximum workers must be at least the minimum' });
+    }
+  });
 const jobPayloadSchema = locationSchema.extend({
   ingestionGroup: z.string().min(1),
   gitUrl: z.url().refine((value) => new URL(value).hostname === 'github.com', 'Repository must be hosted on GitHub'),
   gitBranch: z.string().trim().min(1),
   foreachConcurrency: z.number().int().min(1).max(100),
-  cdcPipelineId: z.string().trim().optional(),
+  cdcPipelineId: z.string().trim().nullable().optional(),
+  schedule: scheduleSchema,
+  compute: computeSchema,
 });
+const jobSchedulePayloadSchema = scheduleSchema.extend({ jobId: z.number().int().positive() });
 
 const plannerNotebookPath = 'notebooks/Task - Plan Configs';
 const workerNotebookPath = 'notebooks/Task - Run Ingestion';
+
+const watersyncDependency = (gitUrl: string, gitBranch: string) =>
+  `watersync@git+${gitUrl.replace(/\.git$/, '')}.git@${gitBranch}`;
 
 const workspace = new WorkspaceClient({});
 const requiredEnv = (name: string) => {
   const value = process.env[name];
   if (!value) throw new Error(`${name} is required`);
   return value;
+};
+const workspaceBaseUrl = () => {
+  const host = requiredEnv('DATABRICKS_HOST').replace(/\/$/, '');
+  return /^https?:\/\//i.test(host) ? host : `https://${host}`;
 };
 const warehouseId = requiredEnv('DATABRICKS_WAREHOUSE_ID');
 
@@ -73,6 +116,91 @@ async function execute(statement: string, parameters: dbsql.StatementParameterLi
     );
   }
   return response;
+}
+
+async function groupHasEnabledIncrementalSource(catalog: string, schema: string, ingestionGroup: string) {
+  const response = await execute(
+    `SELECT count_if(coalesce(enabled, true) AND lower(ingestion_type) = 'incremental') > 0
+     FROM ${tableName(catalog, schema, 'jdbc_ingestion_config')}
+     WHERE ingestion_group = :ingestion_group`,
+    [parameter('ingestion_group', ingestionGroup)]
+  );
+  return response.result?.data_array?.[0]?.[0]?.toLowerCase() === 'true';
+}
+
+const pipelineBootstrap = `from __future__ import annotations
+
+from pyspark import pipelines as dp
+from pyspark.sql import SparkSession
+
+from watersync.cdc_pipeline import build_pipeline_from_spark_conf
+
+spark = SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
+build_pipeline_from_spark_conf(spark=spark, dp_module=dp)
+`;
+
+async function ensureCdcPipeline({
+  pipelineId,
+  catalog,
+  schema,
+  ingestionGroup,
+  gitUrl,
+  gitBranch,
+}: {
+  pipelineId?: string | null;
+  catalog: string;
+  schema: string;
+  ingestionGroup: string;
+  gitUrl: string;
+  gitBranch: string;
+}) {
+  if (pipelineId) return pipelineId;
+
+  const pipelineName = `[${ingestionGroup}] CDC SCD2 Pipeline`;
+  const safeNamePrefix = `[${ingestionGroup}] CDC SCD2`.replace(/'/g, "''");
+  let existingPipelineId: string | undefined;
+  for await (const pipeline of workspace.pipelines.listPipelines({ filter: `name LIKE '${safeNamePrefix}%'` })) {
+    if (pipeline.name === pipelineName && pipeline.pipeline_id) {
+      existingPipelineId = pipeline.pipeline_id;
+      break;
+    }
+  }
+
+  const safeGroup = ingestionGroup.replace(/[^A-Za-z0-9_-]/g, '_');
+  const bootstrapDirectory = '/Shared/watersync-generated-pipelines';
+  const bootstrapWorkspacePath = `${bootstrapDirectory}/${safeGroup}_cdc_pipeline.py`;
+  await workspace.workspace.mkdirs({ path: bootstrapDirectory });
+  await workspace.workspace.import({
+    path: bootstrapWorkspacePath,
+    format: 'RAW',
+    overwrite: true,
+    content: Buffer.from(pipelineBootstrap).toString('base64'),
+  });
+
+  const configurationFqn = `${catalog}.${schema}.jdbc_ingestion_config`;
+  const watermarkFqn = `${catalog}.${schema}.jdbc_ingestion_watermark`;
+  const pipelineSettings: pipelines.CreatePipeline = {
+    name: pipelineName,
+    catalog,
+    target: schema,
+    configuration: {
+      'pipeline.configuration_fqn': configurationFqn,
+      'pipeline.watermark_fqn': watermarkFqn,
+      'pipeline.ingestion_group': ingestionGroup,
+    },
+    libraries: [{ file: { path: `/Workspace${bootstrapWorkspacePath}` } }],
+    environment: { dependencies: [watersyncDependency(gitUrl, gitBranch)] },
+    serverless: true,
+    channel: 'CURRENT',
+  };
+
+  if (existingPipelineId) {
+    await workspace.pipelines.update({ pipeline_id: existingPipelineId, ...pipelineSettings });
+    return existingPipelineId;
+  }
+  const created = await workspace.pipelines.create(pipelineSettings);
+  if (!created.pipeline_id) throw new Error('Databricks created the CDC pipeline without returning an ID');
+  return created.pipeline_id;
 }
 
 const handleError = (res: { status(code: number): { json(value: unknown): void } }, error: unknown) => {
@@ -186,8 +314,46 @@ await createApp({
 
       app.get('/api/jobs', async (_req, res) => {
         try {
+          const visibleJobs = [];
+          for await (const job of workspace.jobs.list({ limit: 100, expand_tasks: false })) visibleJobs.push(job);
+          const workspaceUrl = workspaceBaseUrl();
           const result = [];
-          for await (const job of workspace.jobs.list({ limit: 100, expand_tasks: false })) result.push(job);
+          for (let offset = 0; offset < visibleJobs.length; offset += 8) {
+            const batch = visibleJobs.slice(offset, offset + 8);
+            const summaries = await Promise.all(
+              batch.map(async (job) => {
+                const recentRuns = [];
+                if (job.job_id) {
+                  for await (const run of workspace.jobs.listRuns({
+                    job_id: job.job_id,
+                    limit: 10,
+                    expand_tasks: false,
+                  })) {
+                    recentRuns.push({
+                      run_id: run.run_id,
+                      run_url:
+                        job.job_id && run.run_id
+                          ? `${workspaceBaseUrl()}/jobs/${job.job_id}/runs/${run.run_id}`
+                          : undefined,
+                      run_name: run.run_name,
+                      start_time: run.start_time,
+                      end_time: run.end_time,
+                      setup_duration: run.setup_duration,
+                      execution_duration: run.execution_duration,
+                      cleanup_duration: run.cleanup_duration,
+                      state: run.state,
+                    });
+                  }
+                }
+                return {
+                  ...job,
+                  workspace_url: job.job_id ? `${workspaceUrl}/jobs/${job.job_id}` : workspaceUrl,
+                  runs: recentRuns,
+                };
+              })
+            );
+            result.push(...summaries);
+          }
           res.json({ jobs: result });
         } catch (error) {
           handleError(res, error);
@@ -197,13 +363,39 @@ await createApp({
       app.post('/api/jobs', async (req, res) => {
         try {
           const body = jobPayloadSchema.parse(req.body);
+          const hasIncrementalSources = await groupHasEnabledIncrementalSource(
+            body.catalog,
+            body.schema,
+            body.ingestionGroup
+          );
+          const cdcPipelineId = hasIncrementalSources
+            ? await ensureCdcPipeline({
+                pipelineId: body.cdcPipelineId,
+                catalog: body.catalog,
+                schema: body.schema,
+                ingestionGroup: body.ingestionGroup,
+                gitUrl: body.gitUrl,
+                gitBranch: body.gitBranch,
+              })
+            : undefined;
           const name = `[${body.ingestionGroup}] Ingestion Pipeline`;
           const configurationFqn = `${body.catalog}.${body.schema}.jdbc_ingestion_config`;
           const watermarkFqn = `${body.catalog}.${body.schema}.jdbc_ingestion_watermark`;
+          const environmentKey = 'watersync_environment';
+          const jobClusterKey = 'watersync_cluster';
+          const dependency = watersyncDependency(body.gitUrl, body.gitBranch);
+          const taskCompute =
+            body.compute.mode === 'SERVERLESS'
+              ? { environment_key: environmentKey }
+              : {
+                  job_cluster_key: jobClusterKey,
+                  libraries: [{ pypi: { package: dependency } }],
+                };
           const tasks: jobs.Task[] = [
             {
               task_key: 'ingestion_configs',
               notebook_task: { notebook_path: plannerNotebookPath, source: 'GIT' },
+              ...taskCompute,
             },
             {
               task_key: 'ingestion_worker',
@@ -213,6 +405,7 @@ await createApp({
                 concurrency: body.foreachConcurrency,
                 task: {
                   task_key: 'ingestion_worker_iteration',
+                  ...taskCompute,
                   notebook_task: {
                     notebook_path: workerNotebookPath,
                     source: 'GIT',
@@ -222,16 +415,42 @@ await createApp({
               },
             },
           ];
-          if (body.cdcPipelineId) {
+          if (cdcPipelineId) {
             tasks.push({
               task_key: 'cdc_scd2_pipeline',
               depends_on: [{ task_key: 'ingestion_worker' }],
-              pipeline_task: { pipeline_id: body.cdcPipelineId, full_refresh: false },
+              pipeline_task: { pipeline_id: cdcPipelineId, full_refresh: false },
             });
           }
           const settings: jobs.JobSettings = {
             name,
             max_concurrent_runs: 1,
+            ...(body.compute.mode === 'SERVERLESS'
+              ? {
+                  performance_target: body.compute.performanceTarget,
+                  environments: [
+                    {
+                      environment_key: environmentKey,
+                      spec: { environment_version: '4', dependencies: [dependency] },
+                    },
+                  ],
+                }
+              : {
+                  job_clusters: [
+                    {
+                      job_cluster_key: jobClusterKey,
+                      new_cluster: {
+                        spark_version: body.compute.sparkVersion,
+                        driver_node_type_id: body.compute.driverNodeTypeId,
+                        node_type_id: body.compute.workerNodeTypeId,
+                        autoscale: {
+                          min_workers: body.compute.minWorkers,
+                          max_workers: body.compute.maxWorkers,
+                        },
+                      },
+                    },
+                  ],
+                }),
             parameters: [
               { name: 'configuration_fqn', default: configurationFqn },
               { name: 'watermark_fqn', default: watermarkFqn },
@@ -243,6 +462,15 @@ await createApp({
               git_provider: 'gitHub',
               git_branch: body.gitBranch,
             },
+            ...(body.schedule.enabled
+              ? {
+                  schedule: {
+                    quartz_cron_expression: body.schedule.quartzCronExpression,
+                    timezone_id: body.schedule.timezoneId,
+                    pause_status: body.schedule.pauseStatus,
+                  },
+                }
+              : {}),
           };
           const existing = [];
           for await (const job of workspace.jobs.list({ name, limit: 25, expand_tasks: false })) {
@@ -250,10 +478,10 @@ await createApp({
           }
           if (existing[0]?.job_id) {
             await workspace.jobs.reset({ job_id: existing[0].job_id, new_settings: settings });
-            res.json({ jobId: existing[0].job_id, action: 'updated' });
+            res.json({ jobId: existing[0].job_id, pipelineId: cdcPipelineId, action: 'updated' });
           } else {
             const created = await workspace.jobs.create(settings as jobs.CreateJob);
-            res.json({ jobId: created.job_id, action: 'created' });
+            res.json({ jobId: created.job_id, pipelineId: cdcPipelineId, action: 'created' });
           }
         } catch (error) {
           handleError(res, error);
@@ -265,6 +493,32 @@ await createApp({
           const jobId = z.coerce.number().int().positive().parse(req.params.jobId);
           const run = await workspace.jobs.runNow({ job_id: jobId });
           res.json({ runId: run.run_id });
+        } catch (error) {
+          handleError(res, error);
+        }
+      });
+
+      app.patch('/api/jobs/:jobId/schedule', async (req, res) => {
+        try {
+          const body = jobSchedulePayloadSchema.parse({
+            ...req.body,
+            jobId: z.coerce.number().parse(req.params.jobId),
+          });
+          if (body.enabled) {
+            await workspace.jobs.update({
+              job_id: body.jobId,
+              new_settings: {
+                schedule: {
+                  quartz_cron_expression: body.quartzCronExpression,
+                  timezone_id: body.timezoneId,
+                  pause_status: body.pauseStatus,
+                },
+              },
+            });
+          } else {
+            await workspace.jobs.update({ job_id: body.jobId, fields_to_remove: ['schedule'] });
+          }
+          res.json({ ok: true });
         } catch (error) {
           handleError(res, error);
         }

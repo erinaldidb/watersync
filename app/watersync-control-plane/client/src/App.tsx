@@ -51,6 +51,7 @@ import {
   Clock3,
   Database,
   Droplets,
+  ExternalLink,
   Layers3,
   Play,
   Plus,
@@ -96,7 +97,33 @@ type WatermarkRow = {
   status: string | null;
   last_error: string | null;
 };
-type JobRow = { job_id?: number; settings?: { name?: string }; creator_user_name?: string; created_time?: number };
+type JobRun = {
+  run_id?: number;
+  run_url?: string;
+  run_name?: string;
+  start_time?: number;
+  end_time?: number;
+  setup_duration?: number;
+  execution_duration?: number;
+  cleanup_duration?: number;
+  state?: { life_cycle_state?: string; result_state?: string; state_message?: string };
+};
+type JobSchedule = {
+  quartz_cron_expression: string;
+  timezone_id: string;
+  pause_status?: 'PAUSED' | 'UNPAUSED';
+};
+type JobRow = {
+  job_id?: number;
+  settings?: {
+    name?: string;
+    schedule?: JobSchedule;
+  };
+  creator_user_name?: string;
+  created_time?: number;
+  workspace_url?: string;
+  runs: JobRun[];
+};
 
 const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...init });
@@ -111,6 +138,10 @@ const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   return body as T;
 };
 const errorMessage = (value: unknown) => (value instanceof Error ? value.message : 'Unexpected error');
+const formString = (form: FormData, name: string, fallback: string) => {
+  const value = form.get(name);
+  return typeof value === 'string' && value ? value : fallback;
+};
 const defaultLocation: Location = {
   catalog: 'serverless_pixels_release_catalog',
   schema: 'jdbc_incremental_gh',
@@ -139,6 +170,22 @@ const savedLocation = (): Location => {
 const fqn = (location: Location, table: string) => `${location.catalog}.${location.schema}.${table}`;
 const displayTime = (value: string | number | null | undefined) =>
   value ? new Date(typeof value === 'number' ? value : value).toLocaleString() : 'Never';
+const runStatus = (run?: JobRun) => run?.state?.result_state ?? run?.state?.life_cycle_state ?? 'NEVER_RUN';
+const statusVariant = (status: string): 'default' | 'secondary' | 'destructive' | 'outline' => {
+  if (status === 'SUCCESS') return 'default';
+  if (['FAILED', 'TIMEDOUT', 'CANCELED', 'INTERNAL_ERROR'].includes(status)) return 'destructive';
+  if (['RUNNING', 'PENDING', 'QUEUED', 'TERMINATING'].includes(status)) return 'secondary';
+  return 'outline';
+};
+const runDuration = (run: JobRun) => {
+  const duration =
+    run.end_time && run.start_time
+      ? run.end_time - run.start_time
+      : (run.setup_duration ?? 0) + (run.execution_duration ?? 0) + (run.cleanup_duration ?? 0);
+  if (!duration) return 'Duration unavailable';
+  if (duration < 60_000) return `${Math.max(1, Math.round(duration / 1000))}s`;
+  return `${Math.floor(duration / 60_000)}m ${Math.round((duration % 60_000) / 1000)}s`;
+};
 
 function Layout() {
   const [location, setLocationState] = useState<Location>(savedLocation);
@@ -925,6 +972,8 @@ function JobsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
+  const [runningJob, setRunningJob] = useState<number | null>(null);
+  const [scheduleJob, setScheduleJob] = useState<JobRow | null>(null);
   const groupParams = useMemo(
     () => ({
       table_name: sql.string(fqn(location, 'jdbc_ingestion_config')),
@@ -939,6 +988,7 @@ function JobsPage() {
   } = useAnalyticsQuery('ingestion_groups', groupParams);
   const load = () => {
     setLoading(true);
+    setError(null);
     api<{ jobs: JobRow[] }>('/api/jobs')
       .then((x) => setJobs(x.jobs))
       .catch((e) => setError(errorMessage(e)))
@@ -949,18 +999,22 @@ function JobsPage() {
     return () => window.clearTimeout(timer);
   }, []);
   const run = async (id: number) => {
+    setRunningJob(id);
     try {
       const x = await api<{ runId: number }>(`/api/jobs/${id}/run`, { method: 'POST' });
       alert(`Run ${x.runId} started`);
+      load();
     } catch (e) {
       setError(errorMessage(e));
+    } finally {
+      setRunningJob(null);
     }
   };
   return (
     <>
       <PageTitle
         title="WaterSync Lakeflow Jobs"
-        description="Create one managed job per configured ingestion group, then trigger runs."
+        description="Monitor recent run health, trigger ingestion, or open the full job in Databricks."
         action={
           <Button onClick={() => setOpen(true)}>
             <Plus className="mr-2 h-4 w-4" />
@@ -983,7 +1037,7 @@ function JobsPage() {
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
           {jobs.map((job) => (
-            <Card key={job.job_id}>
+            <Card key={job.job_id} className="job-card">
               <CardHeader>
                 <div className="flex justify-between gap-4">
                   <div>
@@ -992,19 +1046,91 @@ function JobsPage() {
                       ID {job.job_id} · created {displayTime(job.created_time)}
                     </CardDescription>
                   </div>
-                  <Badge variant="outline">Lakeflow Job</Badge>
+                  <Badge variant={statusVariant(runStatus(job.runs[0]))}>{runStatus(job.runs[0]).replaceAll('_', ' ')}</Badge>
                 </div>
               </CardHeader>
-              <CardContent className="flex gap-2">
-                <Button
-                  disabled={!job.job_id}
-                  onClick={() => {
-                    if (job.job_id) void run(job.job_id);
-                  }}
-                >
-                  <Play className="mr-2 h-4 w-4" />
-                  Run now
-                </Button>
+              <CardContent className="space-y-5">
+                <div className="rounded-md border bg-muted/30 p-3">
+                  <div className="mb-1 flex items-center justify-between gap-3">
+                    <div className="flex min-w-0 items-center gap-3">
+                      <span className="text-sm font-medium">Schedule</span>
+                      {job.settings?.schedule && (
+                        <span className="truncate font-mono text-xs text-foreground">
+                          {job.settings.schedule.quartz_cron_expression}
+                        </span>
+                      )}
+                    </div>
+                    <Badge variant={job.settings?.schedule?.pause_status === 'UNPAUSED' ? 'secondary' : 'outline'}>
+                      {!job.settings?.schedule
+                        ? 'Manual only'
+                        : job.settings.schedule.pause_status === 'UNPAUSED'
+                          ? 'Active'
+                          : 'Paused'}
+                    </Badge>
+                  </div>
+                  {job.settings?.schedule ? (
+                    <div className="text-xs text-muted-foreground">{job.settings.schedule.timezone_id}</div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">Runs only when manually triggered.</p>
+                  )}
+                </div>
+                <div>
+                  <div className="mb-2 flex items-center justify-between gap-3 text-xs text-muted-foreground">
+                    <span className="font-medium text-foreground">Last 10 runs</span>
+                    <span>Newest on the right</span>
+                  </div>
+                  {job.runs.length ? (
+                    <div className="run-timeline" aria-label={`Recent run status for ${job.settings?.name ?? `job ${job.job_id}`}`}>
+                      {[...job.runs].reverse().map((recentRun) => {
+                        const status = runStatus(recentRun);
+                        const label = `${status.replaceAll('_', ' ')} · ${displayTime(recentRun.start_time)} · ${runDuration(recentRun)}`;
+                        return (
+                          <a
+                            key={recentRun.run_id}
+                            className={`run-mark run-mark-${status.toLowerCase()}`}
+                            title={label}
+                            aria-label={label}
+                            href={recentRun.run_url}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {status === 'RUNNING' ? (
+                              <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
+                            ) : (
+                              <span>{status === 'SUCCESS' ? '✓' : '!'}</span>
+                            )}
+                          </a>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">No runs recorded yet.</p>
+                  )}
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Latest: {job.runs[0] ? `${displayTime(job.runs[0].start_time)} · ${runDuration(job.runs[0])}` : 'Never run'}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    disabled={!job.job_id || runningJob === job.job_id}
+                    onClick={() => {
+                      if (job.job_id) void run(job.job_id);
+                    }}
+                  >
+                    <Play className="mr-2 h-4 w-4" />
+                    {runningJob === job.job_id ? 'Starting…' : 'Run now'}
+                  </Button>
+                  <Button variant="outline" asChild>
+                    <a href={job.workspace_url} target="_blank" rel="noreferrer">
+                      Open in Databricks
+                      <ExternalLink className="ml-2 h-4 w-4" />
+                    </a>
+                  </Button>
+                  <Button variant="outline" onClick={() => setScheduleJob(job)} disabled={!job.job_id}>
+                    <Clock3 className="mr-2 h-4 w-4" />
+                    Edit schedule
+                  </Button>
+                </div>
               </CardContent>
             </Card>
           ))}
@@ -1019,6 +1145,14 @@ function JobsPage() {
         groupsError={groupsError}
         onSaved={() => {
           setOpen(false);
+          load();
+        }}
+      />
+      <ScheduleDialog
+        job={scheduleJob}
+        onClose={() => setScheduleJob(null)}
+        onSaved={() => {
+          setScheduleJob(null);
           load();
         }}
       />
@@ -1037,7 +1171,12 @@ function JobDialog({
   open: boolean;
   onOpenChange: (v: boolean) => void;
   location: Location;
-  groups: Array<{ ingestion_group: string; source_count: number; enabled_source_count: number }>;
+  groups: Array<{
+    ingestion_group: string;
+    source_count: number;
+    enabled_source_count: number;
+    enabled_incremental_source_count: number;
+  }>;
   groupsLoading: boolean;
   groupsError: string | null;
   onSaved: () => void;
@@ -1045,6 +1184,12 @@ function JobDialog({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [ingestionGroup, setIngestionGroup] = useState('');
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [scheduleActive, setScheduleActive] = useState(true);
+  const [gitUrl, setGitUrl] = useState('https://github.com/erinaldidb/watersync');
+  const [gitBranch, setGitBranch] = useState('main');
+  const [computeMode, setComputeMode] = useState<'SERVERLESS' | 'JOB_CLUSTER'>('SERVERLESS');
+  const [performanceTarget, setPerformanceTarget] = useState<'STANDARD' | 'PERFORMANCE_OPTIMIZED'>('STANDARD');
   useEffect(() => {
     if (open && !ingestionGroup && groups[0]) setIngestionGroup(groups[0].ingestion_group);
   }, [open, ingestionGroup, groups]);
@@ -1063,7 +1208,22 @@ function JobDialog({
           gitUrl: form.get('gitUrl'),
           gitBranch: form.get('gitBranch'),
           foreachConcurrency: Number(form.get('foreachConcurrency')),
-          cdcPipelineId: form.get('cdcPipelineId'),
+          cdcPipelineId: selectedGroup?.enabled_incremental_source_count ? form.get('cdcPipelineId') : null,
+          schedule: {
+            enabled: scheduleEnabled,
+            quartzCronExpression: formString(form, 'quartzCronExpression', '0 0 8 * * ?'),
+            timezoneId: formString(form, 'timezoneId', 'America/New_York'),
+            pauseStatus: scheduleActive ? 'UNPAUSED' : 'PAUSED',
+          },
+          compute: {
+            mode: computeMode,
+            performanceTarget,
+            sparkVersion: formString(form, 'sparkVersion', ''),
+            driverNodeTypeId: formString(form, 'driverNodeTypeId', ''),
+            workerNodeTypeId: formString(form, 'workerNodeTypeId', ''),
+            minWorkers: Number(form.get('minWorkers') ?? 1),
+            maxWorkers: Number(form.get('maxWorkers') ?? 4),
+          },
         }),
       });
       alert(`Job ${result.jobId} ${result.action}`);
@@ -1087,9 +1247,12 @@ function JobDialog({
           {error && <ErrorState message={error} />}
           {groupsError && <ErrorState message={groupsError} />}
           <Tabs defaultValue="job" className="w-full">
-            <TabsList className="grid w-full grid-cols-2">
+            <TabsList className={`grid w-full ${computeMode === 'JOB_CLUSTER' ? 'grid-cols-5' : 'grid-cols-4'}`}>
               <TabsTrigger value="job">Job configuration</TabsTrigger>
               <TabsTrigger value="source">Git source &amp; execution</TabsTrigger>
+              <TabsTrigger value="compute">Compute</TabsTrigger>
+              {computeMode === 'JOB_CLUSTER' && <TabsTrigger value="cluster">Job cluster</TabsTrigger>}
+              <TabsTrigger value="schedule">Schedule</TabsTrigger>
             </TabsList>
             <TabsContent value="job" forceMount className="mt-4 space-y-4 data-[state=inactive]:hidden">
               <div className="space-y-2">
@@ -1157,13 +1320,20 @@ function JobDialog({
                     id="git-url"
                     name="gitUrl"
                     type="url"
-                    defaultValue="https://github.com/erinaldidb/watersync"
+                    value={gitUrl}
+                    onChange={(event) => setGitUrl(event.target.value)}
                     placeholder="https://github.com/organization/repository"
                   />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="git-branch">Branch</Label>
-                  <Input id="git-branch" name="gitBranch" defaultValue="main" placeholder="main" />
+                  <Input
+                    id="git-branch"
+                    name="gitBranch"
+                    value={gitBranch}
+                    onChange={(event) => setGitBranch(event.target.value)}
+                    placeholder="main"
+                  />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="concurrency">Parallel tables</Label>
@@ -1178,11 +1348,128 @@ function JobDialog({
                   />
                 </div>
                 <div className="space-y-2 md:col-span-2">
-                  <Label htmlFor="pipeline-id">CDC pipeline ID (optional)</Label>
-                  <Input id="pipeline-id" name="cdcPipelineId" placeholder="Adds the CDC task when provided" />
+                  <Label htmlFor="pipeline-id">Existing CDC pipeline ID (optional)</Label>
+                  <Input
+                    id="pipeline-id"
+                    name="cdcPipelineId"
+                    placeholder={
+                      selectedGroup?.enabled_incremental_source_count
+                        ? 'Leave blank to create or reuse the group CDC pipeline'
+                        : 'Not required: this group has no enabled incremental tables'
+                    }
+                    disabled={!selectedGroup?.enabled_incremental_source_count}
+                  />
+                  {!selectedGroup?.enabled_incremental_source_count && (
+                    <p className="text-xs text-muted-foreground">
+                      The CDC declarative pipeline task will be omitted for this ingestion group.
+                    </p>
+                  )}
+                  {Boolean(selectedGroup?.enabled_incremental_source_count) && (
+                    <p className="text-xs text-muted-foreground">
+                      When blank, WaterSync automatically provisions a serverless CDC SCD2 pipeline for this group.
+                    </p>
+                  )}
+                </div>
+                <div className="space-y-2 md:col-span-2">
+                  <Label>Task library</Label>
+                  <div className="break-all rounded-md border bg-muted/30 p-3 font-mono text-xs">
+                    watersync@git+{gitUrl.replace(/\.git$/, '')}.git@{gitBranch || 'main'}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Installed on the planner and every ingestion worker task from the selected branch.
+                  </p>
                 </div>
               </div>
             </TabsContent>
+            <TabsContent value="schedule" forceMount className="mt-4 data-[state=inactive]:hidden">
+              <ScheduleFields
+                enabled={scheduleEnabled}
+                onEnabledChange={setScheduleEnabled}
+                active={scheduleActive}
+                onActiveChange={setScheduleActive}
+              />
+            </TabsContent>
+            <TabsContent value="compute" forceMount className="mt-4 data-[state=inactive]:hidden">
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="compute-mode">Compute mode</Label>
+                  <Select value={computeMode} onValueChange={(value) => setComputeMode(value as typeof computeMode)}>
+                    <SelectTrigger id="compute-mode" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="SERVERLESS">Serverless</SelectItem>
+                      <SelectItem value="JOB_CLUSTER">Shared autoscaling job cluster</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {computeMode === 'SERVERLESS' && (
+                  <div className="space-y-2">
+                    <Label htmlFor="performance-target">Serverless performance mode</Label>
+                    <Select
+                      value={performanceTarget}
+                      onValueChange={(value) => setPerformanceTarget(value as typeof performanceTarget)}
+                    >
+                      <SelectTrigger id="performance-target" className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="STANDARD">Standard</SelectItem>
+                        <SelectItem value="PERFORMANCE_OPTIMIZED">Performance optimized</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      Standard favors cost efficiency; performance optimized favors faster startup and execution.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </TabsContent>
+            {computeMode === 'JOB_CLUSTER' && (
+              <TabsContent value="cluster" forceMount className="mt-4 data-[state=inactive]:hidden">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2 md:col-span-2">
+                    <Label htmlFor="spark-version">Databricks Runtime</Label>
+                    <Input
+                      id="spark-version"
+                      name="sparkVersion"
+                      defaultValue="18.x-scala2.13"
+                      placeholder="18.x-scala2.13"
+                      required
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="driver-node-type">Driver node type</Label>
+                    <Input
+                      id="driver-node-type"
+                      name="driverNodeTypeId"
+                      placeholder="For example: i3.xlarge"
+                      required
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="worker-node-type">Worker node type</Label>
+                    <Input
+                      id="worker-node-type"
+                      name="workerNodeTypeId"
+                      placeholder="For example: i3.xlarge"
+                      required
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="min-workers">Minimum workers</Label>
+                    <Input id="min-workers" name="minWorkers" type="number" min="0" defaultValue="1" required />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="max-workers">Maximum workers</Label>
+                    <Input id="max-workers" name="maxWorkers" type="number" min="1" defaultValue="4" required />
+                  </div>
+                  <p className="text-xs text-muted-foreground md:col-span-2">
+                    The planner and ingestion workers share this autoscaling job cluster. The CDC pipeline task uses its own pipeline compute.
+                  </p>
+                </div>
+              </TabsContent>
+            )}
           </Tabs>
           <p className="text-xs text-muted-foreground">
             If a job with the generated name already exists, its definition is updated in place.
@@ -1190,6 +1477,131 @@ function JobDialog({
           <DialogFooter>
             <Button type="submit" disabled={busy || !ingestionGroup || groupsLoading}>
               {busy ? 'Saving…' : 'Create or update job'}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ScheduleFields({
+  enabled,
+  onEnabledChange,
+  active,
+  onActiveChange,
+  schedule,
+}: {
+  enabled: boolean;
+  onEnabledChange: (value: boolean) => void;
+  active: boolean;
+  onActiveChange: (value: boolean) => void;
+  schedule?: JobSchedule;
+}) {
+  return (
+    <div className="space-y-4">
+      <label className="flex items-center justify-between gap-4 rounded-md border p-3 text-sm">
+        <span>
+          <span className="block font-medium">Scheduled execution</span>
+          <span className="text-xs text-muted-foreground">Run automatically using a Quartz cron schedule.</span>
+        </span>
+        <Switch checked={enabled} onCheckedChange={onEnabledChange} aria-label="Scheduled execution" />
+      </label>
+      <div className="grid gap-4 md:grid-cols-2">
+        <div className="space-y-2 md:col-span-2">
+          <Label htmlFor="quartz-cron">Quartz cron expression</Label>
+          <Input
+            id="quartz-cron"
+            name="quartzCronExpression"
+            defaultValue={schedule?.quartz_cron_expression ?? '0 0 8 * * ?'}
+            placeholder="0 0 8 * * ?"
+            required
+            disabled={!enabled}
+          />
+          <p className="text-xs text-muted-foreground">Seconds, minutes, hours, day of month, month, day of week.</p>
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="schedule-timezone">Timezone</Label>
+          <Input
+            id="schedule-timezone"
+            name="timezoneId"
+            defaultValue={schedule?.timezone_id ?? 'America/New_York'}
+            placeholder="America/New_York"
+            required
+            disabled={!enabled}
+          />
+        </div>
+        <label className="flex items-center justify-between gap-4 rounded-md border p-3 text-sm">
+          <span>
+            <span className="block font-medium">Schedule active</span>
+            <span className="text-xs text-muted-foreground">Turn off to save the schedule in a paused state.</span>
+          </span>
+          <Switch
+            checked={active}
+            onCheckedChange={onActiveChange}
+            aria-label="Schedule active"
+            disabled={!enabled}
+          />
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function ScheduleDialog({ job, onClose, onSaved }: { job: JobRow | null; onClose: () => void; onSaved: () => void }) {
+  const schedule = job?.settings?.schedule;
+  const [enabled, setEnabled] = useState(false);
+  const [active, setActive] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    setEnabled(Boolean(schedule));
+    setActive(schedule?.pause_status !== 'PAUSED');
+    setError(null);
+  }, [job, schedule]);
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!job?.job_id) return;
+    const form = new FormData(event.currentTarget);
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/api/jobs/${job.job_id}/schedule`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          enabled,
+          quartzCronExpression: formString(form, 'quartzCronExpression', '0 0 8 * * ?'),
+          timezoneId: formString(form, 'timezoneId', 'America/New_York'),
+          pauseStatus: active ? 'UNPAUSED' : 'PAUSED',
+        }),
+      });
+      onSaved();
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog open={Boolean(job)} onOpenChange={(value) => !value && onClose()}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Edit job schedule</DialogTitle>
+          <DialogDescription>{job?.settings?.name ?? `Job ${job?.job_id}`}</DialogDescription>
+        </DialogHeader>
+        <form onSubmit={(event) => void submit(event)} className="space-y-4">
+          {error && <ErrorState message={error} />}
+          <ScheduleFields
+            key={`${job?.job_id}-${schedule?.quartz_cron_expression ?? 'manual'}`}
+            enabled={enabled}
+            onEnabledChange={setEnabled}
+            active={active}
+            onActiveChange={setActive}
+            schedule={schedule}
+          />
+          <DialogFooter>
+            <Button type="submit" disabled={busy}>
+              {busy ? 'Saving…' : enabled ? 'Save schedule' : 'Remove schedule'}
             </Button>
           </DialogFooter>
         </form>
