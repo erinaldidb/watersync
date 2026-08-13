@@ -13,6 +13,7 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  Checkbox,
   Dialog,
   DialogContent,
   DialogDescription,
@@ -47,6 +48,8 @@ import {
 } from '@databricks/appkit-ui/react';
 import {
   Activity,
+  ArrowLeft,
+  ArrowRight,
   CheckCircle2,
   Clock3,
   Database,
@@ -124,6 +127,25 @@ type JobRow = {
   workspace_url?: string;
   runs: JobRun[];
 };
+type SourceTable = { table_schema: string; table_name: string };
+type SourceColumn = {
+  column_name: string;
+  data_type: string;
+  is_nullable: string;
+  ordinal_position: string;
+  is_primary_key: string;
+};
+type TableDraft = {
+  table: SourceTable;
+  columns: SourceColumn[];
+  keyColumn: string;
+  watermarkColumn: string;
+  partitionColumn: string;
+  predicateColumn: string;
+  targetFqn: string;
+  stagingFqn: string;
+};
+type InferenceProgress = { completed: number; total: number };
 
 const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...init });
@@ -213,7 +235,9 @@ function Layout() {
               <Droplets className="h-5 w-5" />
             </div>
             <div>
-              <div className="brand-name">WaterSync <span>Control Plane</span></div>
+              <div className="brand-name">
+                WaterSync <span>Control Plane</span>
+              </div>
               <div className="brand-subtitle">JDBC ingestion control plane</div>
             </div>
           </div>
@@ -237,7 +261,7 @@ function Layout() {
                 </DialogDescription>
               </DialogHeader>
               <div className="grid gap-4 py-2">
-                <div>
+                <div className="space-y-1.5">
                   <Label htmlFor="catalog">Catalog</Label>
                   <Input
                     id="catalog"
@@ -245,7 +269,7 @@ function Layout() {
                     onChange={(e) => setDraft({ ...draft, catalog: e.target.value })}
                   />
                 </div>
-                <div>
+                <div className="space-y-1.5">
                   <Label htmlFor="schema">Schema</Label>
                   <Input
                     id="schema"
@@ -360,7 +384,7 @@ function OverviewPage() {
               </div>
               <div className="hero-health">
                 <CheckCircle2 className="h-5 w-5" />
-                <div>
+                <div className="mode-field space-y-1.5">
                   <div className="font-semibold">Control plane ready</div>
                   <div className="text-xs opacity-80">Configuration loaded successfully</div>
                 </div>
@@ -495,6 +519,7 @@ function ConfigPage() {
   const [search, setSearch] = useState('');
   const [editing, setEditing] = useState<ConfigRow | null>(null);
   const [open, setOpen] = useState(false);
+  const [discoveryOpen, setDiscoveryOpen] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const params = useMemo(
     () => ({
@@ -529,15 +554,19 @@ function ConfigPage() {
         title="Ingestion configuration"
         description="Exact WaterSync source mappings; first 100 filtered rows."
         action={
-          <Button
-            onClick={() => {
-              setEditing(null);
-              setOpen(true);
-            }}
-          >
-            <Plus className="mr-2 h-4 w-4" />
-            Add entry
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={() => setDiscoveryOpen(true)}>
+              <Database className="mr-2 h-4 w-4" /> Discover tables
+            </Button>
+            <Button
+              onClick={() => {
+                setEditing(null);
+                setOpen(true);
+              }}
+            >
+              <Plus className="mr-2 h-4 w-4" /> Add entry
+            </Button>
+          </div>
         }
       />
       <div className="mb-4 flex gap-2">
@@ -626,7 +655,855 @@ function ConfigPage() {
           refresh();
         }}
       />
+      <DiscoveryDialog
+        open={discoveryOpen}
+        onOpenChange={setDiscoveryOpen}
+        location={location}
+        onSaved={() => {
+          setDiscoveryOpen(false);
+          refresh();
+        }}
+      />
     </>
+  );
+}
+
+const numericTypes = [
+  'smallint',
+  'integer',
+  'int',
+  'bigint',
+  'decimal',
+  'numeric',
+  'number',
+  'real',
+  'float',
+  'double',
+];
+const temporalTypes = [
+  'date',
+  'datetime',
+  'datetime2',
+  'timestamp',
+  'timestamp without time zone',
+  'timestamp with time zone',
+];
+const stringTypes = ['char', 'varchar', 'nvarchar', 'text', 'string'];
+const isType = (column: SourceColumn, types: string[]) =>
+  types.some((type) => column.data_type.toLowerCase().includes(type));
+const safeTargetName = (value: string) => value.replace(/[^A-Za-z0-9_]/g, '_').toLowerCase();
+
+function DiscoveryDialog({
+  open,
+  onOpenChange,
+  location,
+  onSaved,
+}: {
+  open: boolean;
+  onOpenChange: (value: boolean) => void;
+  location: Location;
+  onSaved: () => void;
+}) {
+  const [step, setStep] = useState(1);
+  const [busy, setBusy] = useState(false);
+  const [inferenceProgress, setInferenceProgress] = useState<InferenceProgress | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [group, setGroup] = useState('');
+  const [databaseType, setDatabaseType] = useState('sqlserver');
+  const [connectionMode, setConnectionMode] = useState('uc');
+  const [connectionName, setConnectionName] = useState('');
+  const [database, setDatabase] = useState('');
+  const [jdbcUrl, setJdbcUrl] = useState('');
+  const [jdbcUser, setJdbcUser] = useState('');
+  const [secretScope, setSecretScope] = useState('');
+  const [secretKey, setSecretKey] = useState('');
+  const [tables, setTables] = useState<SourceTable[]>([]);
+  const [tableFilter, setTableFilter] = useState('');
+  const [selectedTables, setSelectedTables] = useState<SourceTable[]>([]);
+  const [ingestionType, setIngestionType] = useState('incremental');
+  const [epicCsa, setEpicCsa] = useState(false);
+  const [drafts, setDrafts] = useState<TableDraft[]>([]);
+  const [reviewPage, setReviewPage] = useState(0);
+  const [confirmedPages, setConfirmedPages] = useState<number[]>([]);
+  const [baseTargetFqn, setBaseTargetFqn] = useState(`${location.catalog}.${location.schema}`);
+  const [baseStagingFqn, setBaseStagingFqn] = useState(`${location.catalog}.${location.schema}`);
+  const [threshold, setThreshold] = useState('5');
+  const [fetchSize, setFetchSize] = useState('10000');
+  const [partitions, setPartitions] = useState('8');
+
+  const reset = () => {
+    setStep(1);
+    setError(null);
+    setTables([]);
+    setSelectedTables([]);
+    setDrafts([]);
+    setReviewPage(0);
+    setConfirmedPages([]);
+    setTableFilter('');
+    setBaseTargetFqn(`${location.catalog}.${location.schema}`);
+    setBaseStagingFqn(`${location.catalog}.${location.schema}`);
+    setInferenceProgress(null);
+  };
+  const changeOpen = (value: boolean) => {
+    if (!value && busy) return;
+    if (!value) reset();
+    onOpenChange(value);
+  };
+  const loadTables = async () => {
+    setBusy(true);
+    setInferenceProgress(null);
+    setError(null);
+    setSelectedTables([]);
+    try {
+      const result = await api<{ tables: SourceTable[] }>('/api/source-tables', {
+        method: 'POST',
+        body: JSON.stringify({
+          connectionName: connectionMode === 'uc' ? connectionName : '',
+          jdbcUrl: connectionMode === 'jdbc' ? jdbcUrl : '',
+          jdbcUser: connectionMode === 'jdbc' ? jdbcUser : '',
+          jdbcSecretScope: connectionMode === 'jdbc' ? secretScope : '',
+          jdbcSecretKey: connectionMode === 'jdbc' ? secretKey : '',
+          database,
+          databaseType,
+        }),
+      });
+      setTables(result.tables);
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const inferColumns = (next: SourceColumn[]) => {
+    const primary = next.filter((column) => column.is_primary_key === '1').map((column) => column.column_name);
+    const idFallback = next.find((column) => /(^id$|_id$)/i.test(column.column_name) && column.is_nullable === 'NO');
+    const key = primary[0] ?? idFallback?.column_name ?? next[0]?.column_name ?? 'none';
+    const watermark =
+      next.find(
+        (column) => isType(column, temporalTypes) && /(update|modified|change|timestamp|date)/i.test(column.column_name)
+      ) ?? next.find((column) => isType(column, temporalTypes));
+    const partition =
+      next.find((column) => column.column_name === key && isType(column, numericTypes)) ??
+      next.find((column) => isType(column, numericTypes) && column.is_nullable === 'NO');
+    const predicate = partition
+      ? undefined
+      : (next.find((column) => column.column_name === key && isType(column, stringTypes)) ??
+        next.find((column) => isType(column, stringTypes) && column.is_nullable === 'NO'));
+    return {
+      keyColumn: primary.length ? primary.join(',') : key,
+      watermarkColumn: watermark?.column_name ?? 'none',
+      partitionColumn: partition?.column_name ?? 'none',
+      predicateColumn: predicate?.column_name ?? 'none',
+    };
+  };
+  const continueToSettings = async () => {
+    if (!selectedTables.length) return;
+    setBusy(true);
+    setError(null);
+    setInferenceProgress({ completed: 0, total: selectedTables.length });
+    setDrafts([]);
+    setReviewPage(0);
+    setConfirmedPages([]);
+    try {
+      for (let offset = 0; offset < selectedTables.length; offset += 10) {
+        const page = selectedTables.slice(offset, offset + 10);
+        const result = await api<{
+          tables: Array<{ sourceSchema: string; table: string; columns: SourceColumn[] }>;
+        }>('/api/source-columns-batch', {
+          method: 'POST',
+          body: JSON.stringify({
+            connectionName: connectionMode === 'uc' ? connectionName : '',
+            jdbcUrl: connectionMode === 'jdbc' ? jdbcUrl : '',
+            jdbcUser: connectionMode === 'jdbc' ? jdbcUser : '',
+            jdbcSecretScope: connectionMode === 'jdbc' ? secretScope : '',
+            jdbcSecretKey: connectionMode === 'jdbc' ? secretKey : '',
+            database,
+            databaseType,
+            tables: page.map((table) => ({ sourceSchema: table.table_schema, table: table.table_name })),
+          }),
+        });
+        const pageDrafts = result.tables.map((resultTable) => {
+          const table = { table_schema: resultTable.sourceSchema, table_name: resultTable.table };
+          const target = safeTargetName(resultTable.table);
+          return {
+            table,
+            columns: resultTable.columns,
+            ...inferColumns(resultTable.columns),
+            targetFqn: `${baseTargetFqn.replace(/\.$/, '')}.${target}`,
+            stagingFqn: ingestionType === 'incremental' ? `${baseStagingFqn.replace(/\.$/, '')}.staging_${target}` : '',
+          };
+        });
+        setDrafts((current) => [...current, ...pageDrafts]);
+        setInferenceProgress({
+          completed: Math.min(offset + page.length, selectedTables.length),
+          total: selectedTables.length,
+        });
+        if (offset === 0) setStep(2);
+      }
+      setInferenceProgress(null);
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const save = async () => {
+    if (!drafts.length) return;
+    setBusy(true);
+    setError(null);
+    try {
+      for (const draft of drafts) {
+        await api('/api/config', {
+          method: 'POST',
+          body: JSON.stringify({
+            ...location,
+            ingestionGroup: group,
+            sourceTableName: `${draft.table.table_schema}.${draft.table.table_name}`,
+            stagingTableFqn: draft.stagingFqn || null,
+            targetTableFqn: draft.targetFqn,
+            ingestionType,
+            keyColumns: draft.keyColumn === 'none' ? null : draft.keyColumn,
+            watermarkColumn: draft.watermarkColumn === 'none' ? null : draft.watermarkColumn,
+            partitionColumn: draft.partitionColumn === 'none' ? null : draft.partitionColumn,
+            predicateColumn: draft.predicateColumn === 'none' ? null : draft.predicateColumn,
+            epicCsaEnabled: epicCsa,
+            jdbcUrl: connectionMode === 'jdbc' ? jdbcUrl : null,
+            jdbcUser: connectionMode === 'jdbc' ? jdbcUser : null,
+            jdbcSecretScope: connectionMode === 'jdbc' ? secretScope : null,
+            jdbcSecretKey: connectionMode === 'jdbc' ? secretKey : null,
+            connectionName: connectionMode === 'uc' ? connectionName : null,
+            watermarkThresholdMinutes: Number(threshold),
+            fetchSize: Number(fetchSize),
+            numPartitions: Number(partitions),
+            enabled: true,
+          }),
+        });
+      }
+      onSaved();
+      reset();
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const filteredTables = tables.filter((table) =>
+    `${table.table_schema}.${table.table_name}`.toLowerCase().includes(tableFilter.toLowerCase())
+  );
+  const canContinue = Boolean(group && selectedTables.length);
+  const canLoadTables =
+    connectionMode === 'uc'
+      ? Boolean(connectionName)
+      : Boolean(database && jdbcUrl && jdbcUser && secretScope && secretKey);
+  const updateDraft = (index: number, changes: Partial<TableDraft>) => {
+    setConfirmedPages((current) => current.filter((page) => page !== Math.floor(index / 10)));
+    setDrafts((current) =>
+      current.map((draft, draftIndex) => (draftIndex === index ? { ...draft, ...changes } : draft))
+    );
+  };
+  const updateBaseTarget = (value: string) => {
+    setBaseTargetFqn(value);
+    setConfirmedPages([]);
+    const base = value.replace(/\.$/, '');
+    setDrafts((current) =>
+      current.map((draft) => ({ ...draft, targetFqn: `${base}.${safeTargetName(draft.table.table_name)}` }))
+    );
+  };
+  const updateBaseStaging = (value: string) => {
+    setBaseStagingFqn(value);
+    setConfirmedPages([]);
+    const base = value.replace(/\.$/, '');
+    setDrafts((current) =>
+      current.map((draft) => ({
+        ...draft,
+        stagingFqn: ingestionType === 'incremental' ? `${base}.staging_${safeTargetName(draft.table.table_name)}` : '',
+      }))
+    );
+  };
+  const draftValid = (draft: TableDraft) =>
+    Boolean(
+      draft.targetFqn &&
+        (ingestionType === 'full' || (draft.keyColumn !== 'none' && (epicCsa || draft.watermarkColumn !== 'none')))
+    );
+  const reviewPageCount = Math.ceil(drafts.length / 10);
+  const reviewPageStart = reviewPage * 10;
+  const visibleDrafts = drafts.slice(reviewPageStart, reviewPageStart + 10);
+  const reviewPageConfirmed = confirmedPages.includes(reviewPage);
+  const reviewPageValid =
+    Boolean(baseTargetFqn && (ingestionType === 'full' || baseStagingFqn)) && visibleDrafts.every(draftValid);
+  const allPagesConfirmed =
+    reviewPageCount > 0 &&
+    Array.from({ length: reviewPageCount }, (_, page) => page).every((page) => confirmedPages.includes(page));
+  const draftsValid =
+    !inferenceProgress &&
+    allPagesConfirmed &&
+    Boolean(baseTargetFqn && (ingestionType === 'full' || baseStagingFqn)) &&
+    drafts.every(draftValid);
+  const confirmCurrentPage = () =>
+    setConfirmedPages((current) => (current.includes(reviewPage) ? current : [...current, reviewPage]));
+  const renderReviewNavigation = () => (
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/30 p-3">
+      <div>
+        <div className="text-sm font-medium">
+          Tables {reviewPageStart + 1}–{reviewPageStart + visibleDrafts.length} of {drafts.length}
+        </div>
+        <div className="text-xs text-muted-foreground">
+          Page {reviewPage + 1} of {reviewPageCount} · up to 10 tables per confirmation
+        </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={reviewPage === 0}
+          onClick={() => setReviewPage((page) => Math.max(0, page - 1))}
+        >
+          Previous
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={reviewPageConfirmed ? 'outline' : 'default'}
+          disabled={!reviewPageValid || reviewPageConfirmed}
+          onClick={confirmCurrentPage}
+        >
+          {reviewPageConfirmed ? (
+            <>
+              <CheckCircle2 className="mr-2 h-4 w-4" />
+              Confirmed
+            </>
+          ) : (
+            `Confirm ${visibleDrafts.length} tables`
+          )}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={!reviewPageConfirmed || reviewPage >= reviewPageCount - 1}
+          onClick={() => setReviewPage((page) => Math.min(reviewPageCount - 1, page + 1))}
+        >
+          Next
+        </Button>
+      </div>
+    </div>
+  );
+
+  return (
+    <Dialog open={open} onOpenChange={changeOpen}>
+      <DialogContent className="max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] overflow-y-auto sm:max-w-7xl 2xl:max-w-[90rem]">
+        <DialogHeader>
+          <DialogTitle>Discover and configure source tables</DialogTitle>
+          <DialogDescription>
+            Step {step} of 2 ·{' '}
+            {step === 1
+              ? 'Connect, discover, and choose the replication mode.'
+              : 'Review inferred columns and runtime settings.'}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="wizard-progress" aria-label={`Step ${step} of 2`}>
+          <span style={{ width: `${step * 50}%` }} />
+        </div>
+        {error && <ErrorState message={error} />}
+        {inferenceProgress && (
+          <Alert>
+            <RefreshCw className={`h-4 w-4 ${busy ? 'animate-spin' : ''}`} />
+            <AlertTitle>Inspecting table metadata</AlertTitle>
+            <AlertDescription>
+              {inferenceProgress.completed} of {inferenceProgress.total} tables inspected · pages of 10, one metadata
+              query per page.
+            </AlertDescription>
+          </Alert>
+        )}
+        {step === 1 ? (
+          <div className="space-y-5">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Connection and ingestion group</CardTitle>
+                <CardDescription>
+                  Use an existing UC connection or discover directly with a JDBC URL and Databricks secret.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                <ControlledField
+                  id="discover-group"
+                  label="Ingestion group"
+                  value={group}
+                  onChange={setGroup}
+                  required
+                />
+                <div className="space-y-1.5">
+                  <Label htmlFor="connection-mode">Connection method</Label>
+                  <Select value={connectionMode} onValueChange={setConnectionMode}>
+                    <SelectTrigger id="connection-mode">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="uc">Existing UC connection</SelectItem>
+                      <SelectItem value="jdbc">Direct JDBC URL</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="database-type">Database type</Label>
+                  <Select value={databaseType} onValueChange={setDatabaseType}>
+                    <SelectTrigger id="database-type">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="sqlserver">SQL Server</SelectItem>
+                      <SelectItem value="postgresql">PostgreSQL</SelectItem>
+                      <SelectItem value="mysql">MySQL</SelectItem>
+                      <SelectItem value="oracle">Oracle</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {connectionMode === 'uc' ? (
+                  <>
+                    <div className="md:col-span-2 xl:col-span-2">
+                      <ControlledField
+                        id="connection-name"
+                        label="UC connection name"
+                        value={connectionName}
+                        onChange={setConnectionName}
+                        required
+                      />
+                    </div>
+                    <p className="self-end pb-2 text-xs text-muted-foreground md:col-span-2 xl:col-span-1">
+                      The source database is defined by the UC connection and cannot be overridden here.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <ControlledField
+                      id="source-database"
+                      label={databaseType === 'oracle' ? 'Oracle service name' : 'Database'}
+                      value={database}
+                      onChange={setDatabase}
+                      required
+                    />
+                    <ControlledField
+                      id="discover-jdbc-user"
+                      label="JDBC user"
+                      value={jdbcUser}
+                      onChange={setJdbcUser}
+                      required
+                    />
+                    <ControlledField
+                      id="discover-secret-scope"
+                      label="Password secret scope"
+                      value={secretScope}
+                      onChange={setSecretScope}
+                      required
+                    />
+                    <ControlledField
+                      id="discover-secret-key"
+                      label="Password secret key"
+                      value={secretKey}
+                      onChange={setSecretKey}
+                      required
+                    />
+                    <div className="md:col-span-2 xl:col-span-2">
+                      <ControlledField
+                        id="discover-jdbc-url"
+                        label="JDBC URL"
+                        value={jdbcUrl}
+                        onChange={setJdbcUrl}
+                        required
+                      />
+                    </div>
+                    <Alert className="md:col-span-2 xl:col-span-3">
+                      <AlertTitle>Secret-backed authentication</AlertTitle>
+                      <AlertDescription>
+                        Do not include a password in the JDBC URL. Discovery creates and removes a temporary UC
+                        connection using this secret reference.
+                      </AlertDescription>
+                    </Alert>
+                  </>
+                )}
+                <div className="flex justify-end border-t pt-4 md:col-span-2 xl:col-span-3">
+                  <Button type="button" onClick={() => void loadTables()} disabled={busy || !canLoadTables}>
+                    {busy ? 'Loading tables…' : 'Load available tables'}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Available tables</CardTitle>
+                <CardDescription>Select every table you want to replicate.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {busy && !tables.length ? (
+                  <Skeleton className="h-56" />
+                ) : !tables.length ? (
+                  <Empty>
+                    <EmptyHeader>
+                      <EmptyTitle>No tables loaded</EmptyTitle>
+                      <EmptyDescription>
+                        Configure a source connection, then load its available tables.
+                      </EmptyDescription>
+                    </EmptyHeader>
+                  </Empty>
+                ) : (
+                  <>
+                    <div className="mb-4 flex flex-wrap items-center gap-3">
+                      <Input
+                        aria-label="Filter available tables"
+                        placeholder="Filter schema or table"
+                        value={tableFilter}
+                        onChange={(event) => setTableFilter(event.target.value)}
+                        className="min-w-64 flex-1"
+                      />
+                      <Badge variant="secondary">{selectedTables.length} selected</Badge>
+                      <div className="flex gap-1">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() =>
+                            setSelectedTables((current) => {
+                              const keyed = new Map(
+                                current.map((table) => [`${table.table_schema}.${table.table_name}`, table])
+                              );
+                              for (const table of filteredTables) {
+                                keyed.set(`${table.table_schema}.${table.table_name}`, table);
+                              }
+                              return [...keyed.values()];
+                            })
+                          }
+                        >
+                          Select filtered
+                        </Button>
+                        <Button type="button" size="sm" variant="ghost" onClick={() => setSelectedTables([])}>
+                          Clear
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="source-table-list">
+                      {filteredTables.map((table) => {
+                        const selected = selectedTables.some(
+                          (selectedTable) =>
+                            selectedTable.table_schema === table.table_schema &&
+                            selectedTable.table_name === table.table_name
+                        );
+                        return (
+                          <button
+                            type="button"
+                            key={`${table.table_schema}.${table.table_name}`}
+                            className={`source-table-option ${selected ? 'source-table-option-selected' : ''}`}
+                            onClick={() =>
+                              setSelectedTables((current) =>
+                                selected
+                                  ? current.filter(
+                                      (selectedTable) =>
+                                        selectedTable.table_schema !== table.table_schema ||
+                                        selectedTable.table_name !== table.table_name
+                                    )
+                                  : [...current, table]
+                              )
+                            }
+                          >
+                            <Checkbox
+                              checked={selected}
+                              aria-label={`Select ${table.table_schema}.${table.table_name}`}
+                            />
+                            <span className="min-w-0 truncate">
+                              {table.table_schema}.<strong>{table.table_name}</strong>
+                            </span>
+                            {selected && <CheckCircle2 className="ml-auto h-4 w-4" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Replication mode</CardTitle>
+              </CardHeader>
+              <CardContent className="grid gap-4 md:grid-cols-2">
+                <div className="mode-field space-y-1.5">
+                  <Label htmlFor="discover-type">Load type</Label>
+                  <Select
+                    value={ingestionType}
+                    onValueChange={(value) => {
+                      setIngestionType(value);
+                      if (value === 'full') setEpicCsa(false);
+                    }}
+                  >
+                    <SelectTrigger id="discover-type">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="full">Initial / full load</SelectItem>
+                      <SelectItem value="incremental">Incremental</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <label className={`mode-toggle ${ingestionType === 'full' ? 'opacity-50' : ''}`}>
+                  <Checkbox
+                    checked={epicCsa}
+                    disabled={ingestionType === 'full'}
+                    onCheckedChange={(checked) => setEpicCsa(checked === true)}
+                  />
+                  <span>
+                    <strong>Use EPIC CSA</strong>
+                    <small>Uses change-sequence tracking instead of a timestamp watermark.</small>
+                  </span>
+                </label>
+              </CardContent>
+            </Card>
+          </div>
+        ) : (
+          <div className="space-y-5">
+            <Alert>
+              <CheckCircle2 className="h-4 w-4" />
+              <AlertTitle>Metadata inferred</AlertTitle>
+              <AlertDescription>
+                Primary-key constraints are preferred. Review every suggestion before saving.
+              </AlertDescription>
+            </Alert>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Review table configurations</CardTitle>
+                <CardDescription>
+                  Confirm each page before continuing. Editing a confirmed table requires that page to be confirmed
+                  again.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid gap-4 rounded-lg border bg-muted/30 p-4 md:grid-cols-2">
+                  <ControlledField
+                    id="base-target-fqn"
+                    label="Base target FQN"
+                    value={baseTargetFqn}
+                    onChange={updateBaseTarget}
+                    required
+                    disabled={Boolean(inferenceProgress)}
+                  />
+                  <ControlledField
+                    id="base-staging-fqn"
+                    label="Base staging FQN"
+                    value={baseStagingFqn}
+                    onChange={updateBaseStaging}
+                    required={ingestionType === 'incremental'}
+                    disabled={Boolean(inferenceProgress)}
+                  />
+                  <p className="text-xs text-muted-foreground md:col-span-2">
+                    WaterSync appends each normalized table name. Staging tables also receive the staging_ prefix.
+                  </p>
+                </div>
+                {renderReviewNavigation()}
+                {visibleDrafts.map((draft, pageIndex) => {
+                  const index = reviewPageStart + pageIndex;
+                  return (
+                    <div
+                      className="rounded-lg border p-4"
+                      key={`${draft.table.table_schema}.${draft.table.table_name}`}
+                    >
+                      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                        <div className="font-mono text-sm font-semibold">
+                          {draft.table.table_schema}.{draft.table.table_name}
+                        </div>
+                        <Badge variant="outline">{draft.columns.length} columns</Badge>
+                      </div>
+                      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                        <ColumnSelect
+                          id={`key-column-${index}`}
+                          label="Key column(s)"
+                          value={draft.keyColumn}
+                          columns={draft.columns}
+                          onChange={(value) => updateDraft(index, { keyColumn: value })}
+                          allowCombined
+                        />
+                        <ColumnSelect
+                          id={`watermark-column-${index}`}
+                          label="Watermark column"
+                          value={draft.watermarkColumn}
+                          columns={draft.columns.filter((column) => isType(column, temporalTypes))}
+                          onChange={(value) => updateDraft(index, { watermarkColumn: value })}
+                          disabled={ingestionType === 'full' || epicCsa}
+                        />
+                        <ColumnSelect
+                          id={`partition-column-${index}`}
+                          label="Numeric partition column"
+                          value={draft.partitionColumn}
+                          columns={draft.columns.filter((column) => isType(column, numericTypes))}
+                          onChange={(value) =>
+                            updateDraft(index, {
+                              partitionColumn: value,
+                              ...(value !== 'none' ? { predicateColumn: 'none' } : {}),
+                            })
+                          }
+                        />
+                        <ColumnSelect
+                          id={`predicate-column-${index}`}
+                          label="String predicate column"
+                          value={draft.predicateColumn}
+                          columns={draft.columns.filter((column) => isType(column, stringTypes))}
+                          onChange={(value) =>
+                            updateDraft(index, {
+                              predicateColumn: value,
+                              ...(value !== 'none' ? { partitionColumn: 'none' } : {}),
+                            })
+                          }
+                        />
+                        <ControlledField
+                          id={`target-fqn-${index}`}
+                          label="Final target FQN"
+                          value={draft.targetFqn}
+                          onChange={(value) => updateDraft(index, { targetFqn: value })}
+                          required
+                        />
+                        <ControlledField
+                          id={`staging-fqn-${index}`}
+                          label="Staging table FQN"
+                          value={draft.stagingFqn}
+                          onChange={(value) => updateDraft(index, { stagingFqn: value })}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+                {renderReviewNavigation()}
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Optional runtime settings</CardTitle>
+              </CardHeader>
+              <CardContent className="grid gap-4 md:grid-cols-3">
+                <ControlledField
+                  id="discover-threshold"
+                  label="Watermark delay (minutes)"
+                  value={threshold}
+                  onChange={setThreshold}
+                  type="number"
+                />
+                <ControlledField
+                  id="discover-fetch-size"
+                  label="JDBC fetch size"
+                  value={fetchSize}
+                  onChange={setFetchSize}
+                  type="number"
+                />
+                <ControlledField
+                  id="discover-partitions"
+                  label="JDBC partitions"
+                  value={partitions}
+                  onChange={setPartitions}
+                  type="number"
+                />
+              </CardContent>
+            </Card>
+          </div>
+        )}
+        <DialogFooter className="gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            disabled={busy}
+            onClick={() => (step === 1 ? changeOpen(false) : setStep(1))}
+          >
+            <ArrowLeft className="mr-2 h-4 w-4" />
+            {step === 1 ? 'Cancel' : 'Back'}
+          </Button>
+          {step === 1 ? (
+            <Button type="button" onClick={() => void continueToSettings()} disabled={busy || !canContinue}>
+              {busy && inferenceProgress
+                ? `Inspecting ${inferenceProgress.completed}/${inferenceProgress.total}`
+                : 'Review inferred settings'}
+              <ArrowRight className="ml-2 h-4 w-4" />
+            </Button>
+          ) : (
+            <Button type="button" onClick={() => void save()} disabled={busy || !draftsValid}>
+              {inferenceProgress
+                ? `Waiting for ${inferenceProgress.total - inferenceProgress.completed} table${inferenceProgress.total - inferenceProgress.completed === 1 ? '' : 's'}`
+                : !allPagesConfirmed
+                  ? `Confirm ${reviewPageCount - confirmedPages.length} page${reviewPageCount - confirmedPages.length === 1 ? '' : 's'}`
+                  : busy
+                    ? 'Saving…'
+                    : `Save ${drafts.length} configuration${drafts.length === 1 ? '' : 's'}`}
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ControlledField({
+  id,
+  label,
+  value,
+  onChange,
+  required = false,
+  type = 'text',
+  disabled = false,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  required?: boolean;
+  type?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor={id}>{label}</Label>
+      <Input
+        id={id}
+        type={type}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        required={required}
+        disabled={disabled}
+      />
+    </div>
+  );
+}
+function ColumnSelect({
+  id,
+  label,
+  value,
+  columns,
+  onChange,
+  disabled = false,
+  allowCombined = false,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  columns: SourceColumn[];
+  onChange: (value: string) => void;
+  disabled?: boolean;
+  allowCombined?: boolean;
+}) {
+  const hasCombined = allowCombined && value.includes(',');
+  return (
+    <div className="space-y-1.5">
+      <Label htmlFor={id}>{label}</Label>
+      <Select value={value} onValueChange={onChange} disabled={disabled}>
+        <SelectTrigger id={id}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="none">None</SelectItem>
+          {hasCombined && <SelectItem value={value}>{value} (composite primary key)</SelectItem>}
+          {columns.map((column) => (
+            <SelectItem key={column.column_name} value={column.column_name}>
+              {column.column_name} · {column.data_type}
+              {column.is_primary_key === '1' ? ' · primary key' : ''}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
   );
 }
 
@@ -1046,7 +1923,9 @@ function JobsPage() {
                       ID {job.job_id} · created {displayTime(job.created_time)}
                     </CardDescription>
                   </div>
-                  <Badge variant={statusVariant(runStatus(job.runs[0]))}>{runStatus(job.runs[0]).replaceAll('_', ' ')}</Badge>
+                  <Badge variant={statusVariant(runStatus(job.runs[0]))}>
+                    {runStatus(job.runs[0]).replaceAll('_', ' ')}
+                  </Badge>
                 </div>
               </CardHeader>
               <CardContent className="space-y-5">
@@ -1080,7 +1959,10 @@ function JobsPage() {
                     <span>Newest on the right</span>
                   </div>
                   {job.runs.length ? (
-                    <div className="run-timeline" aria-label={`Recent run status for ${job.settings?.name ?? `job ${job.job_id}`}`}>
+                    <div
+                      className="run-timeline"
+                      aria-label={`Recent run status for ${job.settings?.name ?? `job ${job.job_id}`}`}
+                    >
                       {[...job.runs].reverse().map((recentRun) => {
                         const status = runStatus(recentRun);
                         const label = `${status.replaceAll('_', ' ')} · ${displayTime(recentRun.start_time)} · ${runDuration(recentRun)}`;
@@ -1104,10 +1986,13 @@ function JobsPage() {
                       })}
                     </div>
                   ) : (
-                    <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">No runs recorded yet.</p>
+                    <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+                      No runs recorded yet.
+                    </p>
                   )}
                   <p className="mt-2 text-xs text-muted-foreground">
-                    Latest: {job.runs[0] ? `${displayTime(job.runs[0].start_time)} · ${runDuration(job.runs[0])}` : 'Never run'}
+                    Latest:{' '}
+                    {job.runs[0] ? `${displayTime(job.runs[0].start_time)} · ${runDuration(job.runs[0])}` : 'Never run'}
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -1286,7 +2171,8 @@ function JobDialog({
                   <CardHeader className="pb-3">
                     <CardTitle className="text-base">Generated job</CardTitle>
                     <CardDescription>
-                      [{selectedGroup.ingestion_group}] Ingestion Pipeline · {selectedGroup.source_count} configured sources
+                      [{selectedGroup.ingestion_group}] Ingestion Pipeline · {selectedGroup.source_count} configured
+                      sources
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="grid gap-4 text-sm text-muted-foreground md:grid-cols-2">
@@ -1304,9 +2190,7 @@ function JobDialog({
                     </div>
                     <div className="min-w-0 space-y-1">
                       <div>ingestion_group</div>
-                      <div className="break-all font-mono text-xs text-foreground">
-                        {selectedGroup.ingestion_group}
-                      </div>
+                      <div className="break-all font-mono text-xs text-foreground">{selectedGroup.ingestion_group}</div>
                     </div>
                   </CardContent>
                 </Card>
@@ -1465,7 +2349,8 @@ function JobDialog({
                     <Input id="max-workers" name="maxWorkers" type="number" min="1" defaultValue="4" required />
                   </div>
                   <p className="text-xs text-muted-foreground md:col-span-2">
-                    The planner and ingestion workers share this autoscaling job cluster. The CDC pipeline task uses its own pipeline compute.
+                    The planner and ingestion workers share this autoscaling job cluster. The CDC pipeline task uses its
+                    own pipeline compute.
                   </p>
                 </div>
               </TabsContent>
@@ -1536,12 +2421,7 @@ function ScheduleFields({
             <span className="block font-medium">Schedule active</span>
             <span className="text-xs text-muted-foreground">Turn off to save the schedule in a paused state.</span>
           </span>
-          <Switch
-            checked={active}
-            onCheckedChange={onActiveChange}
-            aria-label="Schedule active"
-            disabled={!enabled}
-          />
+          <Switch checked={active} onCheckedChange={onActiveChange} aria-label="Schedule active" disabled={!enabled} />
         </label>
       </div>
     </div>

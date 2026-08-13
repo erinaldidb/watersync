@@ -20,6 +20,23 @@ test('configuration screen exposes lookup and create actions', async ({ page }) 
   await expect(page.getByRole('tab', { name: 'Connection & runtime' })).toBeVisible();
 });
 
+test('configuration screen exposes guided JDBC table discovery', async ({ page }) => {
+  await page.goto('/config');
+  await page.getByRole('button', { name: 'Discover tables' }).click();
+  await expect(page.getByRole('heading', { name: 'Discover and configure source tables' })).toBeVisible();
+  await expect(page.getByLabel('Ingestion group')).toBeVisible();
+  await expect(page.getByLabel('Connection method')).toBeVisible();
+  await expect(page.getByLabel('UC connection name')).toBeVisible();
+  await expect(page.getByText('The source database is defined by the UC connection')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Load available tables' })).toBeVisible();
+  await expect(page.getByText('Use EPIC CSA')).toBeVisible();
+  await page.getByLabel('Connection method').click();
+  await page.getByRole('option', { name: 'Direct JDBC URL' }).click();
+  await expect(page.getByLabel('Database')).toBeVisible();
+  await expect(page.getByLabel('JDBC URL')).toBeVisible();
+  await expect(page.getByLabel('Password secret scope')).toBeVisible();
+});
+
 test('jobs screen exposes the guided creation form', async ({ page }) => {
   await page.goto('/jobs');
   await page.getByRole('button', { name: 'Create job' }).click();
