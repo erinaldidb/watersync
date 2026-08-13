@@ -721,6 +721,8 @@ function DiscoveryDialog({
   const [ingestionType, setIngestionType] = useState('incremental');
   const [epicCsa, setEpicCsa] = useState(false);
   const [drafts, setDrafts] = useState<TableDraft[]>([]);
+  const [baseTargetFqn, setBaseTargetFqn] = useState(`${location.catalog}.${location.schema}`);
+  const [baseStagingFqn, setBaseStagingFqn] = useState(`${location.catalog}.${location.schema}`);
   const [threshold, setThreshold] = useState('5');
   const [fetchSize, setFetchSize] = useState('10000');
   const [partitions, setPartitions] = useState('8');
@@ -732,6 +734,8 @@ function DiscoveryDialog({
     setSelectedTables([]);
     setDrafts([]);
     setTableFilter('');
+    setBaseTargetFqn(`${location.catalog}.${location.schema}`);
+    setBaseStagingFqn(`${location.catalog}.${location.schema}`);
   };
   const changeOpen = (value: boolean) => {
     if (!value) reset();
@@ -811,9 +815,8 @@ function DiscoveryDialog({
             table,
             columns: resultTable.columns,
             ...inferColumns(resultTable.columns),
-            targetFqn: `${location.catalog}.${location.schema}.${target}`,
-            stagingFqn:
-              ingestionType === 'incremental' ? `${location.catalog}.${location.schema}.staging_${target}` : '',
+            targetFqn: `${baseTargetFqn.replace(/\.$/, '')}.${target}`,
+            stagingFqn: ingestionType === 'incremental' ? `${baseStagingFqn.replace(/\.$/, '')}.staging_${target}` : '',
           };
         })
       );
@@ -876,11 +879,30 @@ function DiscoveryDialog({
     setDrafts((current) =>
       current.map((draft, draftIndex) => (draftIndex === index ? { ...draft, ...changes } : draft))
     );
-  const draftsValid = drafts.every(
-    (draft) =>
-      draft.targetFqn &&
-      (ingestionType === 'full' || (draft.keyColumn !== 'none' && (epicCsa || draft.watermarkColumn !== 'none')))
-  );
+  const updateBaseTarget = (value: string) => {
+    setBaseTargetFqn(value);
+    const base = value.replace(/\.$/, '');
+    setDrafts((current) =>
+      current.map((draft) => ({ ...draft, targetFqn: `${base}.${safeTargetName(draft.table.table_name)}` }))
+    );
+  };
+  const updateBaseStaging = (value: string) => {
+    setBaseStagingFqn(value);
+    const base = value.replace(/\.$/, '');
+    setDrafts((current) =>
+      current.map((draft) => ({
+        ...draft,
+        stagingFqn: ingestionType === 'incremental' ? `${base}.staging_${safeTargetName(draft.table.table_name)}` : '',
+      }))
+    );
+  };
+  const draftsValid =
+    Boolean(baseTargetFqn && (ingestionType === 'full' || baseStagingFqn)) &&
+    drafts.every(
+      (draft) =>
+        draft.targetFqn &&
+        (ingestionType === 'full' || (draft.keyColumn !== 'none' && (epicCsa || draft.watermarkColumn !== 'none')))
+    );
 
   return (
     <Dialog open={open} onOpenChange={changeOpen}>
@@ -1157,6 +1179,25 @@ function DiscoveryDialog({
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
+                <div className="grid gap-4 rounded-lg border bg-muted/30 p-4 md:grid-cols-2">
+                  <ControlledField
+                    id="base-target-fqn"
+                    label="Base target FQN"
+                    value={baseTargetFqn}
+                    onChange={updateBaseTarget}
+                    required
+                  />
+                  <ControlledField
+                    id="base-staging-fqn"
+                    label="Base staging FQN"
+                    value={baseStagingFqn}
+                    onChange={updateBaseStaging}
+                    required={ingestionType === 'incremental'}
+                  />
+                  <p className="text-xs text-muted-foreground md:col-span-2">
+                    WaterSync appends each normalized table name. Staging tables also receive the staging_ prefix.
+                  </p>
+                </div>
                 {drafts.map((draft, index) => (
                   <div className="rounded-lg border p-4" key={`${draft.table.table_schema}.${draft.table.table_name}`}>
                     <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
