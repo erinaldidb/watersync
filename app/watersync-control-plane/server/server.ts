@@ -54,12 +54,12 @@ const sourceDiscoverySchema = z
     jdbcUser: z.string().trim().optional().default(''),
     jdbcSecretScope: z.string().trim().optional().default(''),
     jdbcSecretKey: z.string().trim().optional().default(''),
-    database: z.string().trim().min(1),
+    database: z.string().trim().optional().default(''),
     databaseType: sourceDatabaseType,
   })
   .superRefine((value, context) => {
     if (value.connectionName) return;
-    for (const field of ['jdbcUrl', 'jdbcUser', 'jdbcSecretScope', 'jdbcSecretKey'] as const) {
+    for (const field of ['database', 'jdbcUrl', 'jdbcUser', 'jdbcSecretScope', 'jdbcSecretKey'] as const) {
       if (!value[field]) {
         context.addIssue({ code: 'custom', path: [field], message: 'Required for direct JDBC discovery' });
       }
@@ -178,12 +178,16 @@ const responseRows = (response: Awaited<ReturnType<typeof execute>>) => {
     Object.fromEntries(names.map((name, index) => [name, values[index] ?? null]))
   );
 };
-const remoteQuery = async (connectionName: string, database: string, query: string) =>
-  execute(`SELECT * FROM remote_query(:connection_name, database => :database, query => :remote_sql)`, [
-    parameter('connection_name', connectionName),
+const remoteQuery = async (connectionName: string, database: string | undefined, query: string) => {
+  const parameters = [parameter('connection_name', connectionName), parameter('remote_sql', query)];
+  if (!database) {
+    return execute(`SELECT * FROM remote_query(:connection_name, query => :remote_sql)`, parameters);
+  }
+  return execute(`SELECT * FROM remote_query(:connection_name, database => :database, query => :remote_sql)`, [
+    ...parameters,
     parameter('database', database),
-    parameter('remote_sql', query),
   ]);
+};
 
 type SourceDiscovery = z.infer<typeof sourceDiscoverySchema>;
 const jdbcEndpoint = (databaseType: SourceDiscovery['databaseType'], jdbcUrl: string) => {
@@ -357,7 +361,11 @@ await createApp({
         try {
           const body = sourceDiscoverySchema.parse(req.body);
           const response = await withDiscoveryConnection(body, (connectionName) =>
-            remoteQuery(connectionName, body.database, listTablesSql(body.databaseType))
+            remoteQuery(
+              connectionName,
+              body.connectionName ? undefined : body.database,
+              listTablesSql(body.databaseType)
+            )
           );
           res.json({ tables: responseRows(response) });
         } catch (error) {
@@ -369,7 +377,11 @@ await createApp({
         try {
           const body = sourceColumnsSchema.parse(req.body);
           const response = await withDiscoveryConnection(body, (connectionName) =>
-            remoteQuery(connectionName, body.database, columnsSql(body.databaseType, body.sourceSchema, body.table))
+            remoteQuery(
+              connectionName,
+              body.connectionName ? undefined : body.database,
+              columnsSql(body.databaseType, body.sourceSchema, body.table)
+            )
           );
           res.json({ columns: responseRows(response) });
         } catch (error) {

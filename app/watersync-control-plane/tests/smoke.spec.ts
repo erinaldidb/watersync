@@ -27,11 +27,12 @@ test('configuration screen exposes guided JDBC table discovery', async ({ page }
   await expect(page.getByLabel('Ingestion group')).toBeVisible();
   await expect(page.getByLabel('Connection method')).toBeVisible();
   await expect(page.getByLabel('UC connection name')).toBeVisible();
-  await expect(page.getByLabel('Database')).toBeVisible();
+  await expect(page.getByText('The source database is defined by the UC connection')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Load available tables' })).toBeVisible();
   await expect(page.getByText('Use EPIC CSA')).toBeVisible();
   await page.getByLabel('Connection method').click();
   await page.getByRole('option', { name: 'Direct JDBC URL' }).click();
+  await expect(page.getByLabel('Database')).toBeVisible();
   await expect(page.getByLabel('JDBC URL')).toBeVisible();
   await expect(page.getByLabel('Password secret scope')).toBeVisible();
 });

@@ -851,8 +851,9 @@ function DiscoveryDialog({
   );
   const canContinue = Boolean(group && selectedTable);
   const canLoadTables =
-    Boolean(database) &&
-    (connectionMode === 'uc' ? Boolean(connectionName) : Boolean(jdbcUrl && jdbcUser && secretScope && secretKey));
+    connectionMode === 'uc'
+      ? Boolean(connectionName)
+      : Boolean(database && jdbcUrl && jdbcUser && secretScope && secretKey);
 
   return (
     <Dialog open={open} onOpenChange={changeOpen}>
@@ -912,15 +913,8 @@ function DiscoveryDialog({
                     </SelectContent>
                   </Select>
                 </div>
-                <ControlledField
-                  id="source-database"
-                  label="Database"
-                  value={database}
-                  onChange={setDatabase}
-                  required
-                />
                 {connectionMode === 'uc' ? (
-                  <div className="md:col-span-2">
+                  <div className="md:col-span-2 space-y-2">
                     <ControlledField
                       id="connection-name"
                       label="UC connection name"
@@ -928,9 +922,20 @@ function DiscoveryDialog({
                       onChange={setConnectionName}
                       required
                     />
+                    <p className="text-xs text-muted-foreground">
+                      The source database is defined by the UC connection and cannot be overridden here.
+                    </p>
                   </div>
                 ) : (
                   <>
+                    <ControlledField
+                      id="source-database"
+                      label="Database"
+                      value={database}
+                      onChange={setDatabase}
+                      required
+                    />
+                    <div />
                     <div className="md:col-span-2">
                       <ControlledField
                         id="discover-jdbc-url"
