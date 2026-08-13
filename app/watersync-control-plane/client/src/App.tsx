@@ -135,6 +135,16 @@ type SourceColumn = {
   ordinal_position: string;
   is_primary_key: string;
 };
+type TableDraft = {
+  table: SourceTable;
+  columns: SourceColumn[];
+  keyColumn: string;
+  watermarkColumn: string;
+  partitionColumn: string;
+  predicateColumn: string;
+  targetFqn: string;
+  stagingFqn: string;
+};
 
 const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...init });
@@ -707,16 +717,10 @@ function DiscoveryDialog({
   const [secretKey, setSecretKey] = useState('');
   const [tables, setTables] = useState<SourceTable[]>([]);
   const [tableFilter, setTableFilter] = useState('');
-  const [selectedTable, setSelectedTable] = useState<SourceTable | null>(null);
+  const [selectedTables, setSelectedTables] = useState<SourceTable[]>([]);
   const [ingestionType, setIngestionType] = useState('incremental');
   const [epicCsa, setEpicCsa] = useState(false);
-  const [columns, setColumns] = useState<SourceColumn[]>([]);
-  const [keyColumn, setKeyColumn] = useState('none');
-  const [watermarkColumn, setWatermarkColumn] = useState('none');
-  const [partitionColumn, setPartitionColumn] = useState('none');
-  const [predicateColumn, setPredicateColumn] = useState('none');
-  const [targetFqn, setTargetFqn] = useState('');
-  const [stagingFqn, setStagingFqn] = useState('');
+  const [drafts, setDrafts] = useState<TableDraft[]>([]);
   const [threshold, setThreshold] = useState('5');
   const [fetchSize, setFetchSize] = useState('10000');
   const [partitions, setPartitions] = useState('8');
@@ -725,8 +729,8 @@ function DiscoveryDialog({
     setStep(1);
     setError(null);
     setTables([]);
-    setSelectedTable(null);
-    setColumns([]);
+    setSelectedTables([]);
+    setDrafts([]);
     setTableFilter('');
   };
   const changeOpen = (value: boolean) => {
@@ -736,7 +740,7 @@ function DiscoveryDialog({
   const loadTables = async () => {
     setBusy(true);
     setError(null);
-    setSelectedTable(null);
+    setSelectedTables([]);
     try {
       const result = await api<{ tables: SourceTable[] }>('/api/source-tables', {
         method: 'POST',
@@ -772,17 +776,21 @@ function DiscoveryDialog({
       ? undefined
       : (next.find((column) => column.column_name === key && isType(column, stringTypes)) ??
         next.find((column) => isType(column, stringTypes) && column.is_nullable === 'NO'));
-    setKeyColumn(primary.length ? primary.join(',') : key);
-    setWatermarkColumn(watermark?.column_name ?? 'none');
-    setPartitionColumn(partition?.column_name ?? 'none');
-    setPredicateColumn(predicate?.column_name ?? 'none');
+    return {
+      keyColumn: primary.length ? primary.join(',') : key,
+      watermarkColumn: watermark?.column_name ?? 'none',
+      partitionColumn: partition?.column_name ?? 'none',
+      predicateColumn: predicate?.column_name ?? 'none',
+    };
   };
   const continueToSettings = async () => {
-    if (!selectedTable) return;
+    if (!selectedTables.length) return;
     setBusy(true);
     setError(null);
     try {
-      const result = await api<{ columns: SourceColumn[] }>('/api/source-columns', {
+      const result = await api<{
+        tables: Array<{ sourceSchema: string; table: string; columns: SourceColumn[] }>;
+      }>('/api/source-columns-batch', {
         method: 'POST',
         body: JSON.stringify({
           connectionName: connectionMode === 'uc' ? connectionName : '',
@@ -792,15 +800,23 @@ function DiscoveryDialog({
           jdbcSecretKey: connectionMode === 'jdbc' ? secretKey : '',
           database,
           databaseType,
-          sourceSchema: selectedTable.table_schema,
-          table: selectedTable.table_name,
+          tables: selectedTables.map((table) => ({ sourceSchema: table.table_schema, table: table.table_name })),
         }),
       });
-      setColumns(result.columns);
-      inferColumns(result.columns);
-      const target = safeTargetName(selectedTable.table_name);
-      setTargetFqn(`${location.catalog}.${location.schema}.${target}`);
-      setStagingFqn(ingestionType === 'incremental' ? `${location.catalog}.${location.schema}.staging_${target}` : '');
+      setDrafts(
+        result.tables.map((resultTable) => {
+          const table = { table_schema: resultTable.sourceSchema, table_name: resultTable.table };
+          const target = safeTargetName(resultTable.table);
+          return {
+            table,
+            columns: resultTable.columns,
+            ...inferColumns(resultTable.columns),
+            targetFqn: `${location.catalog}.${location.schema}.${target}`,
+            stagingFqn:
+              ingestionType === 'incremental' ? `${location.catalog}.${location.schema}.staging_${target}` : '',
+          };
+        })
+      );
       setStep(2);
     } catch (value) {
       setError(errorMessage(value));
@@ -809,35 +825,37 @@ function DiscoveryDialog({
     }
   };
   const save = async () => {
-    if (!selectedTable) return;
+    if (!drafts.length) return;
     setBusy(true);
     setError(null);
     try {
-      await api('/api/config', {
-        method: 'POST',
-        body: JSON.stringify({
-          ...location,
-          ingestionGroup: group,
-          sourceTableName: `${selectedTable.table_schema}.${selectedTable.table_name}`,
-          stagingTableFqn: stagingFqn || null,
-          targetTableFqn: targetFqn,
-          ingestionType,
-          keyColumns: keyColumn === 'none' ? null : keyColumn,
-          watermarkColumn: watermarkColumn === 'none' ? null : watermarkColumn,
-          partitionColumn: partitionColumn === 'none' ? null : partitionColumn,
-          predicateColumn: predicateColumn === 'none' ? null : predicateColumn,
-          epicCsaEnabled: epicCsa,
-          jdbcUrl: connectionMode === 'jdbc' ? jdbcUrl : null,
-          jdbcUser: connectionMode === 'jdbc' ? jdbcUser : null,
-          jdbcSecretScope: connectionMode === 'jdbc' ? secretScope : null,
-          jdbcSecretKey: connectionMode === 'jdbc' ? secretKey : null,
-          connectionName: connectionMode === 'uc' ? connectionName : null,
-          watermarkThresholdMinutes: Number(threshold),
-          fetchSize: Number(fetchSize),
-          numPartitions: Number(partitions),
-          enabled: true,
-        }),
-      });
+      for (const draft of drafts) {
+        await api('/api/config', {
+          method: 'POST',
+          body: JSON.stringify({
+            ...location,
+            ingestionGroup: group,
+            sourceTableName: `${draft.table.table_schema}.${draft.table.table_name}`,
+            stagingTableFqn: draft.stagingFqn || null,
+            targetTableFqn: draft.targetFqn,
+            ingestionType,
+            keyColumns: draft.keyColumn === 'none' ? null : draft.keyColumn,
+            watermarkColumn: draft.watermarkColumn === 'none' ? null : draft.watermarkColumn,
+            partitionColumn: draft.partitionColumn === 'none' ? null : draft.partitionColumn,
+            predicateColumn: draft.predicateColumn === 'none' ? null : draft.predicateColumn,
+            epicCsaEnabled: epicCsa,
+            jdbcUrl: connectionMode === 'jdbc' ? jdbcUrl : null,
+            jdbcUser: connectionMode === 'jdbc' ? jdbcUser : null,
+            jdbcSecretScope: connectionMode === 'jdbc' ? secretScope : null,
+            jdbcSecretKey: connectionMode === 'jdbc' ? secretKey : null,
+            connectionName: connectionMode === 'uc' ? connectionName : null,
+            watermarkThresholdMinutes: Number(threshold),
+            fetchSize: Number(fetchSize),
+            numPartitions: Number(partitions),
+            enabled: true,
+          }),
+        });
+      }
       onSaved();
       reset();
     } catch (value) {
@@ -849,17 +867,26 @@ function DiscoveryDialog({
   const filteredTables = tables.filter((table) =>
     `${table.table_schema}.${table.table_name}`.toLowerCase().includes(tableFilter.toLowerCase())
   );
-  const canContinue = Boolean(group && selectedTable);
+  const canContinue = Boolean(group && selectedTables.length);
   const canLoadTables =
     connectionMode === 'uc'
       ? Boolean(connectionName)
       : Boolean(database && jdbcUrl && jdbcUser && secretScope && secretKey);
+  const updateDraft = (index: number, changes: Partial<TableDraft>) =>
+    setDrafts((current) =>
+      current.map((draft, draftIndex) => (draftIndex === index ? { ...draft, ...changes } : draft))
+    );
+  const draftsValid = drafts.every(
+    (draft) =>
+      draft.targetFqn &&
+      (ingestionType === 'full' || (draft.keyColumn !== 'none' && (epicCsa || draft.watermarkColumn !== 'none')))
+  );
 
   return (
     <Dialog open={open} onOpenChange={changeOpen}>
       <DialogContent className="max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] overflow-y-auto sm:max-w-7xl 2xl:max-w-[90rem]">
         <DialogHeader>
-          <DialogTitle>Discover and configure a source table</DialogTitle>
+          <DialogTitle>Discover and configure source tables</DialogTitle>
           <DialogDescription>
             Step {step} of 2 ·{' '}
             {step === 1
@@ -989,7 +1016,7 @@ function DiscoveryDialog({
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">Available tables</CardTitle>
-                <CardDescription>Select one table to replicate.</CardDescription>
+                <CardDescription>Select every table you want to replicate.</CardDescription>
               </CardHeader>
               <CardContent>
                 {busy && !tables.length ? (
@@ -1010,19 +1037,60 @@ function DiscoveryDialog({
                       onChange={(event) => setTableFilter(event.target.value)}
                       className="mb-3"
                     />
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <span className="text-xs text-muted-foreground">{selectedTables.length} selected</span>
+                      <div className="flex gap-1">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() =>
+                            setSelectedTables((current) => {
+                              const keyed = new Map(
+                                current.map((table) => [`${table.table_schema}.${table.table_name}`, table])
+                              );
+                              for (const table of filteredTables) {
+                                keyed.set(`${table.table_schema}.${table.table_name}`, table);
+                              }
+                              return [...keyed.values()];
+                            })
+                          }
+                        >
+                          Select filtered
+                        </Button>
+                        <Button type="button" size="sm" variant="ghost" onClick={() => setSelectedTables([])}>
+                          Clear
+                        </Button>
+                      </div>
+                    </div>
                     <div className="source-table-list">
                       {filteredTables.map((table) => {
-                        const selected =
-                          selectedTable?.table_schema === table.table_schema &&
-                          selectedTable.table_name === table.table_name;
+                        const selected = selectedTables.some(
+                          (selectedTable) =>
+                            selectedTable.table_schema === table.table_schema &&
+                            selectedTable.table_name === table.table_name
+                        );
                         return (
                           <button
                             type="button"
                             key={`${table.table_schema}.${table.table_name}`}
                             className={`source-table-option ${selected ? 'source-table-option-selected' : ''}`}
-                            onClick={() => setSelectedTable(table)}
+                            onClick={() =>
+                              setSelectedTables((current) =>
+                                selected
+                                  ? current.filter(
+                                      (selectedTable) =>
+                                        selectedTable.table_schema !== table.table_schema ||
+                                        selectedTable.table_name !== table.table_name
+                                    )
+                                  : [...current, table]
+                              )
+                            }
                           >
-                            <TableProperties className="h-4 w-4" />
+                            <Checkbox
+                              checked={selected}
+                              aria-label={`Select ${table.table_schema}.${table.table_name}`}
+                            />
                             <span>
                               {table.table_schema}.<strong>{table.table_name}</strong>
                             </span>
@@ -1083,61 +1151,77 @@ function DiscoveryDialog({
             </Alert>
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Keys and replication columns</CardTitle>
+                <CardTitle className="text-base">Review {drafts.length} table configurations</CardTitle>
                 <CardDescription>
-                  {selectedTable?.table_schema}.{selectedTable?.table_name} · {columns.length} columns discovered
+                  Each table keeps its own inferred key, watermark, partitioning, and target.
                 </CardDescription>
               </CardHeader>
-              <CardContent className="grid gap-4 md:grid-cols-2">
-                <ColumnSelect
-                  id="key-column"
-                  label="Key column(s)"
-                  value={keyColumn}
-                  columns={columns}
-                  onChange={setKeyColumn}
-                  allowCombined
-                />
-                <ColumnSelect
-                  id="watermark-column"
-                  label="Watermark column"
-                  value={watermarkColumn}
-                  columns={columns.filter((column) => isType(column, temporalTypes))}
-                  onChange={setWatermarkColumn}
-                  disabled={ingestionType === 'full' || epicCsa}
-                />
-                <ColumnSelect
-                  id="partition-column"
-                  label="Numeric partition column"
-                  value={partitionColumn}
-                  columns={columns.filter((column) => isType(column, numericTypes))}
-                  onChange={(value) => {
-                    setPartitionColumn(value);
-                    if (value !== 'none') setPredicateColumn('none');
-                  }}
-                />
-                <ColumnSelect
-                  id="predicate-column"
-                  label="String predicate column"
-                  value={predicateColumn}
-                  columns={columns.filter((column) => isType(column, stringTypes))}
-                  onChange={(value) => {
-                    setPredicateColumn(value);
-                    if (value !== 'none') setPartitionColumn('none');
-                  }}
-                />
-                <ControlledField
-                  id="target-fqn"
-                  label="Final target FQN"
-                  value={targetFqn}
-                  onChange={setTargetFqn}
-                  required
-                />
-                <ControlledField
-                  id="staging-fqn"
-                  label="Staging table FQN"
-                  value={stagingFqn}
-                  onChange={setStagingFqn}
-                />
+              <CardContent className="space-y-4">
+                {drafts.map((draft, index) => (
+                  <div className="rounded-lg border p-4" key={`${draft.table.table_schema}.${draft.table.table_name}`}>
+                    <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                      <div className="font-mono text-sm font-semibold">
+                        {draft.table.table_schema}.{draft.table.table_name}
+                      </div>
+                      <Badge variant="outline">{draft.columns.length} columns</Badge>
+                    </div>
+                    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                      <ColumnSelect
+                        id={`key-column-${index}`}
+                        label="Key column(s)"
+                        value={draft.keyColumn}
+                        columns={draft.columns}
+                        onChange={(value) => updateDraft(index, { keyColumn: value })}
+                        allowCombined
+                      />
+                      <ColumnSelect
+                        id={`watermark-column-${index}`}
+                        label="Watermark column"
+                        value={draft.watermarkColumn}
+                        columns={draft.columns.filter((column) => isType(column, temporalTypes))}
+                        onChange={(value) => updateDraft(index, { watermarkColumn: value })}
+                        disabled={ingestionType === 'full' || epicCsa}
+                      />
+                      <ColumnSelect
+                        id={`partition-column-${index}`}
+                        label="Numeric partition column"
+                        value={draft.partitionColumn}
+                        columns={draft.columns.filter((column) => isType(column, numericTypes))}
+                        onChange={(value) =>
+                          updateDraft(index, {
+                            partitionColumn: value,
+                            ...(value !== 'none' ? { predicateColumn: 'none' } : {}),
+                          })
+                        }
+                      />
+                      <ColumnSelect
+                        id={`predicate-column-${index}`}
+                        label="String predicate column"
+                        value={draft.predicateColumn}
+                        columns={draft.columns.filter((column) => isType(column, stringTypes))}
+                        onChange={(value) =>
+                          updateDraft(index, {
+                            predicateColumn: value,
+                            ...(value !== 'none' ? { partitionColumn: 'none' } : {}),
+                          })
+                        }
+                      />
+                      <ControlledField
+                        id={`target-fqn-${index}`}
+                        label="Final target FQN"
+                        value={draft.targetFqn}
+                        onChange={(value) => updateDraft(index, { targetFqn: value })}
+                        required
+                      />
+                      <ControlledField
+                        id={`staging-fqn-${index}`}
+                        label="Staging table FQN"
+                        value={draft.stagingFqn}
+                        onChange={(value) => updateDraft(index, { stagingFqn: value })}
+                      />
+                    </div>
+                  </div>
+                ))}
               </CardContent>
             </Card>
             <Card>
@@ -1181,16 +1265,8 @@ function DiscoveryDialog({
               <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
           ) : (
-            <Button
-              type="button"
-              onClick={() => void save()}
-              disabled={
-                busy ||
-                !targetFqn ||
-                (ingestionType === 'incremental' && (keyColumn === 'none' || (!epicCsa && watermarkColumn === 'none')))
-              }
-            >
-              {busy ? 'Saving…' : 'Save configuration'}
+            <Button type="button" onClick={() => void save()} disabled={busy || !draftsValid}>
+              {busy ? 'Saving…' : `Save ${drafts.length} configuration${drafts.length === 1 ? '' : 's'}`}
             </Button>
           )}
         </DialogFooter>

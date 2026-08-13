@@ -23,7 +23,7 @@ test('configuration screen exposes lookup and create actions', async ({ page }) 
 test('configuration screen exposes guided JDBC table discovery', async ({ page }) => {
   await page.goto('/config');
   await page.getByRole('button', { name: 'Discover tables' }).click();
-  await expect(page.getByRole('heading', { name: 'Discover and configure a source table' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Discover and configure source tables' })).toBeVisible();
   await expect(page.getByLabel('Ingestion group')).toBeVisible();
   await expect(page.getByLabel('Connection method')).toBeVisible();
   await expect(page.getByLabel('UC connection name')).toBeVisible();

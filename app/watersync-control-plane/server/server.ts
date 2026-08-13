@@ -76,6 +76,12 @@ const sourceColumnsSchema = sourceDiscoverySchema.extend({
   sourceSchema: z.string().trim().min(1),
   table: z.string().trim().min(1),
 });
+const sourceColumnsBatchSchema = sourceDiscoverySchema.extend({
+  tables: z
+    .array(z.object({ sourceSchema: z.string().trim().min(1), table: z.string().trim().min(1) }))
+    .min(1)
+    .max(100),
+});
 const keySchema = locationSchema.extend({ ingestionGroup: z.string().min(1), sourceTableName: z.string().min(1) });
 const watermarkSchema = keySchema.extend({ lastWatermark: z.string().nullable(), status: z.string().min(1) });
 const cronExpression = z
@@ -384,6 +390,27 @@ await createApp({
             )
           );
           res.json({ columns: responseRows(response) });
+        } catch (error) {
+          handleError(res, error);
+        }
+      });
+
+      app.post('/api/source-columns-batch', async (req, res) => {
+        try {
+          const body = sourceColumnsBatchSchema.parse(req.body);
+          const tables = await withDiscoveryConnection(body, async (connectionName) => {
+            const results = [];
+            for (const table of body.tables) {
+              const response = await remoteQuery(
+                connectionName,
+                body.connectionName ? undefined : body.database,
+                columnsSql(body.databaseType, table.sourceSchema, table.table)
+              );
+              results.push({ ...table, columns: responseRows(response) });
+            }
+            return results;
+          });
+          res.json({ tables });
         } catch (error) {
           handleError(res, error);
         }
