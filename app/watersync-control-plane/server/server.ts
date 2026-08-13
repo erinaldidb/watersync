@@ -305,6 +305,56 @@ const columnsSql = (databaseType: z.infer<typeof sourceDatabaseType>, sourceSche
     ORDER BY c.ORDINAL_POSITION`;
 };
 
+const columnsBatchSql = (
+  databaseType: z.infer<typeof sourceDatabaseType>,
+  tables: Array<{ sourceSchema: string; table: string }>
+) => {
+  if (databaseType === 'oracle') {
+    const filter = tables
+      .map(
+        (table) =>
+          `(c.OWNER = UPPER(${sqlLiteral(table.sourceSchema)}) AND c.TABLE_NAME = UPPER(${sqlLiteral(table.table)}))`
+      )
+      .join(' OR ');
+    return `SELECT c.OWNER AS source_schema, c.TABLE_NAME AS source_table,
+        c.COLUMN_NAME AS column_name, c.DATA_TYPE AS data_type,
+        CASE c.NULLABLE WHEN 'Y' THEN 'YES' ELSE 'NO' END AS is_nullable,
+        c.COLUMN_ID AS ordinal_position,
+        CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS is_primary_key
+      FROM ALL_TAB_COLUMNS c
+      LEFT JOIN (
+        SELECT k.OWNER, k.TABLE_NAME, k.COLUMN_NAME
+        FROM ALL_CONSTRAINTS tc
+        JOIN ALL_CONS_COLUMNS k ON tc.OWNER = k.OWNER AND tc.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+        WHERE tc.CONSTRAINT_TYPE = 'P'
+      ) pk ON pk.OWNER = c.OWNER AND pk.TABLE_NAME = c.TABLE_NAME AND pk.COLUMN_NAME = c.COLUMN_NAME
+      WHERE ${filter}
+      ORDER BY c.OWNER, c.TABLE_NAME, c.COLUMN_ID`;
+  }
+  const filter = tables
+    .map(
+      (table) => `(c.TABLE_SCHEMA = ${sqlLiteral(table.sourceSchema)} AND c.TABLE_NAME = ${sqlLiteral(table.table)})`
+    )
+    .join(' OR ');
+  return `SELECT c.TABLE_SCHEMA AS source_schema, c.TABLE_NAME AS source_table,
+      c.COLUMN_NAME AS column_name, c.DATA_TYPE AS data_type,
+      c.IS_NULLABLE AS is_nullable, c.ORDINAL_POSITION AS ordinal_position,
+      CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS is_primary_key
+    FROM INFORMATION_SCHEMA.COLUMNS c
+    LEFT JOIN (
+      SELECT k.TABLE_SCHEMA, k.TABLE_NAME, k.COLUMN_NAME
+      FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+      JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE k
+        ON tc.CONSTRAINT_CATALOG = k.CONSTRAINT_CATALOG
+        AND tc.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA
+        AND tc.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+        AND tc.TABLE_SCHEMA = k.TABLE_SCHEMA AND tc.TABLE_NAME = k.TABLE_NAME
+      WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+    ) pk ON pk.TABLE_SCHEMA = c.TABLE_SCHEMA AND pk.TABLE_NAME = c.TABLE_NAME AND pk.COLUMN_NAME = c.COLUMN_NAME
+    WHERE ${filter}
+    ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION`;
+};
+
 async function groupHasEnabledIncrementalSource(catalog: string, schema: string, ingestionGroup: string) {
   const response = await execute(
     `SELECT count_if(coalesce(enabled, true) AND lower(ingestion_type) = 'incremental') > 0
@@ -436,25 +486,34 @@ await createApp({
       app.post('/api/source-columns-batch', async (req, res) => {
         try {
           const body = sourceColumnsBatchSchema.parse(req.body);
-          const tables = await withDiscoveryConnection(body, async (connectionName) => {
-            const results = [];
-            for (let offset = 0; offset < body.tables.length; offset += 4) {
-              const batch = body.tables.slice(offset, offset + 4);
-              const batchResults = await Promise.all(
-                batch.map(async (table) => {
-                  const response = await remoteQuery(
-                    connectionName,
-                    body.connectionName ? undefined : body.database,
-                    columnsSql(body.databaseType, table.sourceSchema, table.table),
-                    body.databaseType
-                  );
-                  return { ...table, columns: responseRows(response) };
-                })
-              );
-              results.push(...batchResults);
-            }
-            return results;
+          const rows = await withDiscoveryConnection(body, async (connectionName) => {
+            const response = await remoteQuery(
+              connectionName,
+              body.connectionName ? undefined : body.database,
+              columnsBatchSql(body.databaseType, body.tables),
+              body.databaseType
+            );
+            return responseRows(response);
           });
+          const rowValue = (row: Record<string, string | null>, name: string) =>
+            row[name] ?? row[name.toUpperCase()] ?? null;
+          const grouped = new Map<string, Array<Record<string, string | null>>>();
+          for (const row of rows) {
+            const key = `${rowValue(row, 'source_schema')}\u0000${rowValue(row, 'source_table')}`.toLowerCase();
+            const columns = grouped.get(key) ?? [];
+            columns.push({
+              column_name: rowValue(row, 'column_name'),
+              data_type: rowValue(row, 'data_type'),
+              is_nullable: rowValue(row, 'is_nullable'),
+              ordinal_position: rowValue(row, 'ordinal_position'),
+              is_primary_key: rowValue(row, 'is_primary_key'),
+            });
+            grouped.set(key, columns);
+          }
+          const tables = body.tables.map((table) => ({
+            ...table,
+            columns: grouped.get(`${table.sourceSchema}\u0000${table.table}`.toLowerCase()) ?? [],
+          }));
           res.json({ tables });
         } catch (error) {
           handleError(res, error);

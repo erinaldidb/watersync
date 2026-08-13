@@ -1011,8 +1011,8 @@ function DiscoveryDialog({
             <RefreshCw className={`h-4 w-4 ${busy ? 'animate-spin' : ''}`} />
             <AlertTitle>Inspecting table metadata</AlertTitle>
             <AlertDescription>
-              {inferenceProgress.completed} of {inferenceProgress.total} tables inspected · pages of 10, four concurrent
-              queries per page.
+              {inferenceProgress.completed} of {inferenceProgress.total} tables inspected · pages of 10, one metadata
+              query per page.
             </AlertDescription>
           </Alert>
         )}
