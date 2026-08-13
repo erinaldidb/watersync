@@ -984,6 +984,7 @@ function DiscoveryDialog({
                       <SelectItem value="sqlserver">SQL Server</SelectItem>
                       <SelectItem value="postgresql">PostgreSQL</SelectItem>
                       <SelectItem value="mysql">MySQL</SelectItem>
+                      <SelectItem value="oracle">Oracle</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -1006,7 +1007,7 @@ function DiscoveryDialog({
                   <>
                     <ControlledField
                       id="source-database"
-                      label="Database"
+                      label={databaseType === 'oracle' ? 'Oracle service name' : 'Database'}
                       value={database}
                       onChange={setDatabase}
                       required

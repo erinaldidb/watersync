@@ -46,7 +46,7 @@ const configSchema = locationSchema
       });
     }
   });
-const sourceDatabaseType = z.enum(['postgresql', 'mysql', 'sqlserver']);
+const sourceDatabaseType = z.enum(['postgresql', 'mysql', 'sqlserver', 'oracle']);
 const sourceDiscoverySchema = z
   .object({
     connectionName: z.string().trim().optional().default(''),
@@ -184,12 +184,18 @@ const responseRows = (response: Awaited<ReturnType<typeof execute>>) => {
     Object.fromEntries(names.map((name, index) => [name, values[index] ?? null]))
   );
 };
-const remoteQuery = async (connectionName: string, database: string | undefined, query: string) => {
+const remoteQuery = async (
+  connectionName: string,
+  database: string | undefined,
+  query: string,
+  databaseType: z.infer<typeof sourceDatabaseType>
+) => {
   const parameters = [parameter('connection_name', connectionName), parameter('remote_sql', query)];
   if (!database) {
     return execute(`SELECT * FROM remote_query(:connection_name, query => :remote_sql)`, parameters);
   }
-  return execute(`SELECT * FROM remote_query(:connection_name, database => :database, query => :remote_sql)`, [
+  const databaseOption = databaseType === 'oracle' ? 'service_name' : 'database';
+  return execute(`SELECT * FROM remote_query(:connection_name, ${databaseOption} => :database, query => :remote_sql)`, [
     ...parameters,
     parameter('database', database),
   ]);
@@ -205,6 +211,15 @@ const jdbcEndpoint = (databaseType: SourceDiscovery['databaseType'], jdbcUrl: st
     const match = /^jdbc:sqlserver:\/\/([^:;]+)(?::(\d+))?(?:;.*)?$/i.exec(jdbcUrl);
     if (!match) throw new Error('Use a SQL Server JDBC URL such as jdbc:sqlserver://host:1433;databaseName=mydb');
     return { host: match[1], port: match[2] ?? '1433' };
+  }
+  if (databaseType === 'oracle') {
+    const serviceMatch = /^jdbc:oracle:thin:@\/\/([^:/]+)(?::(\d+))?\/[^/?;]+(?:[?;].*)?$/i.exec(jdbcUrl);
+    const sidMatch = /^jdbc:oracle:thin:@([^:/]+)(?::(\d+))?:[^:;/?]+(?:[?;].*)?$/i.exec(jdbcUrl);
+    const match = serviceMatch ?? sidMatch;
+    if (!match) {
+      throw new Error('Use an Oracle JDBC URL such as jdbc:oracle:thin:@//host:1521/service_name');
+    }
+    return { host: match[1], port: match[2] ?? '1521' };
   }
   const match = /^jdbc:(?:postgresql|mysql):\/\/([^/:?;]+)(?::(\d+))?\/[^?;]+(?:[?;].*)?$/i.exec(jdbcUrl);
   if (!match) throw new Error(`Use a ${databaseType} JDBC URL containing a host and database`);
@@ -235,6 +250,12 @@ async function withDiscoveryConnection<T>(body: SourceDiscovery, action: (connec
 }
 
 const listTablesSql = (databaseType: z.infer<typeof sourceDatabaseType>) => {
+  if (databaseType === 'oracle') {
+    return `SELECT OWNER AS table_schema, TABLE_NAME AS table_name
+      FROM ALL_TABLES
+      ORDER BY OWNER, TABLE_NAME
+      FETCH FIRST 1000 ROWS ONLY`;
+  }
   const base = `SELECT ${databaseType === 'sqlserver' ? 'TOP 1000 ' : ''}TABLE_SCHEMA AS table_schema, TABLE_NAME AS table_name
     FROM INFORMATION_SCHEMA.TABLES
     WHERE TABLE_TYPE IN ('BASE TABLE', 'TABLE')
@@ -245,6 +266,21 @@ const listTablesSql = (databaseType: z.infer<typeof sourceDatabaseType>) => {
 const columnsSql = (databaseType: z.infer<typeof sourceDatabaseType>, sourceSchema: string, table: string) => {
   const schema = sqlLiteral(sourceSchema);
   const tableNameValue = sqlLiteral(table);
+  if (databaseType === 'oracle') {
+    return `SELECT c.COLUMN_NAME AS column_name, c.DATA_TYPE AS data_type,
+        CASE c.NULLABLE WHEN 'Y' THEN 'YES' ELSE 'NO' END AS is_nullable,
+        c.COLUMN_ID AS ordinal_position,
+        CASE WHEN EXISTS (
+          SELECT 1
+          FROM ALL_CONSTRAINTS tc
+          JOIN ALL_CONS_COLUMNS k ON tc.OWNER = k.OWNER AND tc.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+          WHERE tc.CONSTRAINT_TYPE = 'P' AND tc.OWNER = c.OWNER
+            AND tc.TABLE_NAME = c.TABLE_NAME AND k.COLUMN_NAME = c.COLUMN_NAME
+        ) THEN 1 ELSE 0 END AS is_primary_key
+      FROM ALL_TAB_COLUMNS c
+      WHERE c.OWNER = UPPER(${schema}) AND c.TABLE_NAME = UPPER(${tableNameValue})
+      ORDER BY c.COLUMN_ID`;
+  }
   const concat =
     databaseType === 'mysql'
       ? 'GROUP_CONCAT(k.COLUMN_NAME ORDER BY k.ORDINAL_POSITION)'
@@ -370,7 +406,8 @@ await createApp({
             remoteQuery(
               connectionName,
               body.connectionName ? undefined : body.database,
-              listTablesSql(body.databaseType)
+              listTablesSql(body.databaseType),
+              body.databaseType
             )
           );
           res.json({ tables: responseRows(response) });
@@ -386,7 +423,8 @@ await createApp({
             remoteQuery(
               connectionName,
               body.connectionName ? undefined : body.database,
-              columnsSql(body.databaseType, body.sourceSchema, body.table)
+              columnsSql(body.databaseType, body.sourceSchema, body.table),
+              body.databaseType
             )
           );
           res.json({ columns: responseRows(response) });
@@ -407,7 +445,8 @@ await createApp({
                   const response = await remoteQuery(
                     connectionName,
                     body.connectionName ? undefined : body.database,
-                    columnsSql(body.databaseType, table.sourceSchema, table.table)
+                    columnsSql(body.databaseType, table.sourceSchema, table.table),
+                    body.databaseType
                   );
                   return { ...table, columns: responseRows(response) };
                 })
