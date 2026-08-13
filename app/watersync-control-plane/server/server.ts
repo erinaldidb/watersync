@@ -400,13 +400,19 @@ await createApp({
           const body = sourceColumnsBatchSchema.parse(req.body);
           const tables = await withDiscoveryConnection(body, async (connectionName) => {
             const results = [];
-            for (const table of body.tables) {
-              const response = await remoteQuery(
-                connectionName,
-                body.connectionName ? undefined : body.database,
-                columnsSql(body.databaseType, table.sourceSchema, table.table)
+            for (let offset = 0; offset < body.tables.length; offset += 4) {
+              const batch = body.tables.slice(offset, offset + 4);
+              const batchResults = await Promise.all(
+                batch.map(async (table) => {
+                  const response = await remoteQuery(
+                    connectionName,
+                    body.connectionName ? undefined : body.database,
+                    columnsSql(body.databaseType, table.sourceSchema, table.table)
+                  );
+                  return { ...table, columns: responseRows(response) };
+                })
               );
-              results.push({ ...table, columns: responseRows(response) });
+              results.push(...batchResults);
             }
             return results;
           });

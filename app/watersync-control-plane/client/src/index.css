@@ -221,28 +221,34 @@ body {
   transition: width 180ms ease;
 }
 .source-table-list {
-  max-height: 18rem;
+  max-height: 22rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.5rem;
   overflow-y: auto;
   border: 1px solid var(--border);
   border-radius: 0.6rem;
+  background: color-mix(in oklch, var(--muted) 45%, var(--card));
+  padding: 0.5rem;
 }
 .source-table-option {
   display: flex;
   width: 100%;
   align-items: center;
   gap: 0.6rem;
-  border-bottom: 1px solid var(--border);
+  min-height: 2.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--card);
   padding: 0.65rem 0.75rem;
   color: var(--foreground);
   text-align: left;
-}
-.source-table-option:last-child {
-  border-bottom: 0;
 }
 .source-table-option:hover {
   background: var(--muted);
 }
 .source-table-option-selected {
+  border-color: color-mix(in oklch, var(--primary) 45%, var(--border));
   background: color-mix(in oklch, var(--primary) 10%, var(--card));
   color: var(--primary);
 }
@@ -254,10 +260,29 @@ body {
   border-radius: 0.6rem;
   padding: 0.7rem 0.8rem;
 }
+.mode-field,
+.mode-toggle {
+  min-height: 4.5rem;
+}
+.mode-field {
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  padding: 0.7rem 0.8rem;
+}
 .mode-toggle small {
   display: block;
   margin-top: 0.15rem;
   color: var(--muted-foreground);
+}
+@media (min-width: 48rem) {
+  .source-table-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (min-width: 75rem) {
+  .source-table-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 .job-card {

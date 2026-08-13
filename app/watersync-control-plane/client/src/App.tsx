@@ -260,7 +260,7 @@ function Layout() {
                 </DialogDescription>
               </DialogHeader>
               <div className="grid gap-4 py-2">
-                <div>
+                <div className="space-y-1.5">
                   <Label htmlFor="catalog">Catalog</Label>
                   <Input
                     id="catalog"
@@ -268,7 +268,7 @@ function Layout() {
                     onChange={(e) => setDraft({ ...draft, catalog: e.target.value })}
                   />
                 </div>
-                <div>
+                <div className="space-y-1.5">
                   <Label htmlFor="schema">Schema</Label>
                   <Input
                     id="schema"
@@ -383,7 +383,7 @@ function OverviewPage() {
               </div>
               <div className="hero-health">
                 <CheckCircle2 className="h-5 w-5" />
-                <div>
+                <div className="mode-field space-y-1.5">
                   <div className="font-semibold">Control plane ready</div>
                   <div className="text-xs opacity-80">Configuration loaded successfully</div>
                 </div>
@@ -921,7 +921,7 @@ function DiscoveryDialog({
         </div>
         {error && <ErrorState message={error} />}
         {step === 1 ? (
-          <div className="grid gap-6 lg:grid-cols-[minmax(0,1.35fr)_minmax(20rem,1fr)]">
+          <div className="space-y-5">
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">Connection and ingestion group</CardTitle>
@@ -929,7 +929,7 @@ function DiscoveryDialog({
                   Use an existing UC connection or discover directly with a JDBC URL and Databricks secret.
                 </CardDescription>
               </CardHeader>
-              <CardContent className="grid gap-4 md:grid-cols-2">
+              <CardContent className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                 <ControlledField
                   id="discover-group"
                   label="Ingestion group"
@@ -937,7 +937,7 @@ function DiscoveryDialog({
                   onChange={setGroup}
                   required
                 />
-                <div>
+                <div className="space-y-1.5">
                   <Label htmlFor="connection-mode">Connection method</Label>
                   <Select value={connectionMode} onValueChange={setConnectionMode}>
                     <SelectTrigger id="connection-mode">
@@ -949,7 +949,7 @@ function DiscoveryDialog({
                     </SelectContent>
                   </Select>
                 </div>
-                <div>
+                <div className="space-y-1.5">
                   <Label htmlFor="database-type">Database type</Label>
                   <Select value={databaseType} onValueChange={setDatabaseType}>
                     <SelectTrigger id="database-type">
@@ -963,18 +963,20 @@ function DiscoveryDialog({
                   </Select>
                 </div>
                 {connectionMode === 'uc' ? (
-                  <div className="md:col-span-2 space-y-2">
-                    <ControlledField
-                      id="connection-name"
-                      label="UC connection name"
-                      value={connectionName}
-                      onChange={setConnectionName}
-                      required
-                    />
-                    <p className="text-xs text-muted-foreground">
+                  <>
+                    <div className="md:col-span-2 xl:col-span-2">
+                      <ControlledField
+                        id="connection-name"
+                        label="UC connection name"
+                        value={connectionName}
+                        onChange={setConnectionName}
+                        required
+                      />
+                    </div>
+                    <p className="self-end pb-2 text-xs text-muted-foreground md:col-span-2 xl:col-span-1">
                       The source database is defined by the UC connection and cannot be overridden here.
                     </p>
-                  </div>
+                  </>
                 ) : (
                   <>
                     <ControlledField
@@ -984,16 +986,6 @@ function DiscoveryDialog({
                       onChange={setDatabase}
                       required
                     />
-                    <div />
-                    <div className="md:col-span-2">
-                      <ControlledField
-                        id="discover-jdbc-url"
-                        label="JDBC URL"
-                        value={jdbcUrl}
-                        onChange={setJdbcUrl}
-                        required
-                      />
-                    </div>
                     <ControlledField
                       id="discover-jdbc-user"
                       label="JDBC user"
@@ -1001,7 +993,6 @@ function DiscoveryDialog({
                       onChange={setJdbcUser}
                       required
                     />
-                    <div />
                     <ControlledField
                       id="discover-secret-scope"
                       label="Password secret scope"
@@ -1016,7 +1007,16 @@ function DiscoveryDialog({
                       onChange={setSecretKey}
                       required
                     />
-                    <Alert className="md:col-span-2">
+                    <div className="md:col-span-2 xl:col-span-2">
+                      <ControlledField
+                        id="discover-jdbc-url"
+                        label="JDBC URL"
+                        value={jdbcUrl}
+                        onChange={setJdbcUrl}
+                        required
+                      />
+                    </div>
+                    <Alert className="md:col-span-2 xl:col-span-3">
                       <AlertTitle>Secret-backed authentication</AlertTitle>
                       <AlertDescription>
                         Do not include a password in the JDBC URL. Discovery creates and removes a temporary UC
@@ -1025,14 +1025,11 @@ function DiscoveryDialog({
                     </Alert>
                   </>
                 )}
-                <Button
-                  type="button"
-                  className="md:col-span-2"
-                  onClick={() => void loadTables()}
-                  disabled={busy || !canLoadTables}
-                >
-                  {busy ? 'Loading tables…' : 'Load available tables'}
-                </Button>
+                <div className="flex justify-end border-t pt-4 md:col-span-2 xl:col-span-3">
+                  <Button type="button" onClick={() => void loadTables()} disabled={busy || !canLoadTables}>
+                    {busy ? 'Loading tables…' : 'Load available tables'}
+                  </Button>
+                </div>
               </CardContent>
             </Card>
             <Card>
@@ -1047,20 +1044,22 @@ function DiscoveryDialog({
                   <Empty>
                     <EmptyHeader>
                       <EmptyTitle>No tables loaded</EmptyTitle>
-                      <EmptyDescription>Enter a connection and database, then load tables.</EmptyDescription>
+                      <EmptyDescription>
+                        Configure a source connection, then load its available tables.
+                      </EmptyDescription>
                     </EmptyHeader>
                   </Empty>
                 ) : (
                   <>
-                    <Input
-                      aria-label="Filter available tables"
-                      placeholder="Filter schema or table"
-                      value={tableFilter}
-                      onChange={(event) => setTableFilter(event.target.value)}
-                      className="mb-3"
-                    />
-                    <div className="mb-2 flex items-center justify-between gap-2">
-                      <span className="text-xs text-muted-foreground">{selectedTables.length} selected</span>
+                    <div className="mb-4 flex flex-wrap items-center gap-3">
+                      <Input
+                        aria-label="Filter available tables"
+                        placeholder="Filter schema or table"
+                        value={tableFilter}
+                        onChange={(event) => setTableFilter(event.target.value)}
+                        className="min-w-64 flex-1"
+                      />
+                      <Badge variant="secondary">{selectedTables.length} selected</Badge>
                       <div className="flex gap-1">
                         <Button
                           type="button"
@@ -1113,7 +1112,7 @@ function DiscoveryDialog({
                               checked={selected}
                               aria-label={`Select ${table.table_schema}.${table.table_name}`}
                             />
-                            <span>
+                            <span className="min-w-0 truncate">
                               {table.table_schema}.<strong>{table.table_name}</strong>
                             </span>
                             {selected && <CheckCircle2 className="ml-auto h-4 w-4" />}
@@ -1125,12 +1124,12 @@ function DiscoveryDialog({
                 )}
               </CardContent>
             </Card>
-            <Card className="lg:col-span-2">
+            <Card>
               <CardHeader>
                 <CardTitle className="text-base">Replication mode</CardTitle>
               </CardHeader>
               <CardContent className="grid gap-4 md:grid-cols-2">
-                <div>
+                <div className="mode-field space-y-1.5">
                   <Label htmlFor="discover-type">Load type</Label>
                   <Select
                     value={ingestionType}
@@ -1332,7 +1331,7 @@ function ControlledField({
   type?: string;
 }) {
   return (
-    <div>
+    <div className="space-y-1.5">
       <Label htmlFor={id}>{label}</Label>
       <Input id={id} type={type} value={value} onChange={(event) => onChange(event.target.value)} required={required} />
     </div>
@@ -1357,7 +1356,7 @@ function ColumnSelect({
 }) {
   const hasCombined = allowCombined && value.includes(',');
   return (
-    <div>
+    <div className="space-y-1.5">
       <Label htmlFor={id}>{label}</Label>
       <Select value={value} onValueChange={onChange} disabled={disabled}>
         <SelectTrigger id={id}>
