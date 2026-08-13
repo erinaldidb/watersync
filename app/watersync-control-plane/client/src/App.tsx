@@ -13,6 +13,7 @@ import {
   CardDescription,
   CardHeader,
   CardTitle,
+  Checkbox,
   Dialog,
   DialogContent,
   DialogDescription,
@@ -47,6 +48,8 @@ import {
 } from '@databricks/appkit-ui/react';
 import {
   Activity,
+  ArrowLeft,
+  ArrowRight,
   CheckCircle2,
   Clock3,
   Database,
@@ -123,6 +126,14 @@ type JobRow = {
   created_time?: number;
   workspace_url?: string;
   runs: JobRun[];
+};
+type SourceTable = { table_schema: string; table_name: string };
+type SourceColumn = {
+  column_name: string;
+  data_type: string;
+  is_nullable: string;
+  ordinal_position: string;
+  is_primary_key: string;
 };
 
 const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
@@ -213,7 +224,9 @@ function Layout() {
               <Droplets className="h-5 w-5" />
             </div>
             <div>
-              <div className="brand-name">WaterSync <span>Control Plane</span></div>
+              <div className="brand-name">
+                WaterSync <span>Control Plane</span>
+              </div>
               <div className="brand-subtitle">JDBC ingestion control plane</div>
             </div>
           </div>
@@ -495,6 +508,7 @@ function ConfigPage() {
   const [search, setSearch] = useState('');
   const [editing, setEditing] = useState<ConfigRow | null>(null);
   const [open, setOpen] = useState(false);
+  const [discoveryOpen, setDiscoveryOpen] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const params = useMemo(
     () => ({
@@ -529,15 +543,19 @@ function ConfigPage() {
         title="Ingestion configuration"
         description="Exact WaterSync source mappings; first 100 filtered rows."
         action={
-          <Button
-            onClick={() => {
-              setEditing(null);
-              setOpen(true);
-            }}
-          >
-            <Plus className="mr-2 h-4 w-4" />
-            Add entry
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={() => setDiscoveryOpen(true)}>
+              <Database className="mr-2 h-4 w-4" /> Discover tables
+            </Button>
+            <Button
+              onClick={() => {
+                setEditing(null);
+                setOpen(true);
+              }}
+            >
+              <Plus className="mr-2 h-4 w-4" /> Add entry
+            </Button>
+          </div>
         }
       />
       <div className="mb-4 flex gap-2">
@@ -626,7 +644,613 @@ function ConfigPage() {
           refresh();
         }}
       />
+      <DiscoveryDialog
+        open={discoveryOpen}
+        onOpenChange={setDiscoveryOpen}
+        location={location}
+        onSaved={() => {
+          setDiscoveryOpen(false);
+          refresh();
+        }}
+      />
     </>
+  );
+}
+
+const numericTypes = [
+  'smallint',
+  'integer',
+  'int',
+  'bigint',
+  'decimal',
+  'numeric',
+  'number',
+  'real',
+  'float',
+  'double',
+];
+const temporalTypes = [
+  'date',
+  'datetime',
+  'datetime2',
+  'timestamp',
+  'timestamp without time zone',
+  'timestamp with time zone',
+];
+const stringTypes = ['char', 'varchar', 'nvarchar', 'text', 'string'];
+const isType = (column: SourceColumn, types: string[]) =>
+  types.some((type) => column.data_type.toLowerCase().includes(type));
+const safeTargetName = (value: string) => value.replace(/[^A-Za-z0-9_]/g, '_').toLowerCase();
+
+function DiscoveryDialog({
+  open,
+  onOpenChange,
+  location,
+  onSaved,
+}: {
+  open: boolean;
+  onOpenChange: (value: boolean) => void;
+  location: Location;
+  onSaved: () => void;
+}) {
+  const [step, setStep] = useState(1);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [group, setGroup] = useState('');
+  const [databaseType, setDatabaseType] = useState('sqlserver');
+  const [connectionMode, setConnectionMode] = useState('uc');
+  const [connectionName, setConnectionName] = useState('');
+  const [database, setDatabase] = useState('');
+  const [jdbcUrl, setJdbcUrl] = useState('');
+  const [jdbcUser, setJdbcUser] = useState('');
+  const [secretScope, setSecretScope] = useState('');
+  const [secretKey, setSecretKey] = useState('');
+  const [tables, setTables] = useState<SourceTable[]>([]);
+  const [tableFilter, setTableFilter] = useState('');
+  const [selectedTable, setSelectedTable] = useState<SourceTable | null>(null);
+  const [ingestionType, setIngestionType] = useState('incremental');
+  const [epicCsa, setEpicCsa] = useState(false);
+  const [columns, setColumns] = useState<SourceColumn[]>([]);
+  const [keyColumn, setKeyColumn] = useState('none');
+  const [watermarkColumn, setWatermarkColumn] = useState('none');
+  const [partitionColumn, setPartitionColumn] = useState('none');
+  const [predicateColumn, setPredicateColumn] = useState('none');
+  const [targetFqn, setTargetFqn] = useState('');
+  const [stagingFqn, setStagingFqn] = useState('');
+  const [threshold, setThreshold] = useState('5');
+  const [fetchSize, setFetchSize] = useState('10000');
+  const [partitions, setPartitions] = useState('8');
+
+  const reset = () => {
+    setStep(1);
+    setError(null);
+    setTables([]);
+    setSelectedTable(null);
+    setColumns([]);
+    setTableFilter('');
+  };
+  const changeOpen = (value: boolean) => {
+    if (!value) reset();
+    onOpenChange(value);
+  };
+  const loadTables = async () => {
+    setBusy(true);
+    setError(null);
+    setSelectedTable(null);
+    try {
+      const result = await api<{ tables: SourceTable[] }>('/api/source-tables', {
+        method: 'POST',
+        body: JSON.stringify({
+          connectionName: connectionMode === 'uc' ? connectionName : '',
+          jdbcUrl: connectionMode === 'jdbc' ? jdbcUrl : '',
+          jdbcUser: connectionMode === 'jdbc' ? jdbcUser : '',
+          jdbcSecretScope: connectionMode === 'jdbc' ? secretScope : '',
+          jdbcSecretKey: connectionMode === 'jdbc' ? secretKey : '',
+          database,
+          databaseType,
+        }),
+      });
+      setTables(result.tables);
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const inferColumns = (next: SourceColumn[]) => {
+    const primary = next.filter((column) => column.is_primary_key === '1').map((column) => column.column_name);
+    const idFallback = next.find((column) => /(^id$|_id$)/i.test(column.column_name) && column.is_nullable === 'NO');
+    const key = primary[0] ?? idFallback?.column_name ?? next[0]?.column_name ?? 'none';
+    const watermark =
+      next.find(
+        (column) => isType(column, temporalTypes) && /(update|modified|change|timestamp|date)/i.test(column.column_name)
+      ) ?? next.find((column) => isType(column, temporalTypes));
+    const partition =
+      next.find((column) => column.column_name === key && isType(column, numericTypes)) ??
+      next.find((column) => isType(column, numericTypes) && column.is_nullable === 'NO');
+    const predicate = partition
+      ? undefined
+      : (next.find((column) => column.column_name === key && isType(column, stringTypes)) ??
+        next.find((column) => isType(column, stringTypes) && column.is_nullable === 'NO'));
+    setKeyColumn(primary.length ? primary.join(',') : key);
+    setWatermarkColumn(watermark?.column_name ?? 'none');
+    setPartitionColumn(partition?.column_name ?? 'none');
+    setPredicateColumn(predicate?.column_name ?? 'none');
+  };
+  const continueToSettings = async () => {
+    if (!selectedTable) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api<{ columns: SourceColumn[] }>('/api/source-columns', {
+        method: 'POST',
+        body: JSON.stringify({
+          connectionName: connectionMode === 'uc' ? connectionName : '',
+          jdbcUrl: connectionMode === 'jdbc' ? jdbcUrl : '',
+          jdbcUser: connectionMode === 'jdbc' ? jdbcUser : '',
+          jdbcSecretScope: connectionMode === 'jdbc' ? secretScope : '',
+          jdbcSecretKey: connectionMode === 'jdbc' ? secretKey : '',
+          database,
+          databaseType,
+          sourceSchema: selectedTable.table_schema,
+          table: selectedTable.table_name,
+        }),
+      });
+      setColumns(result.columns);
+      inferColumns(result.columns);
+      const target = safeTargetName(selectedTable.table_name);
+      setTargetFqn(`${location.catalog}.${location.schema}.${target}`);
+      setStagingFqn(ingestionType === 'incremental' ? `${location.catalog}.${location.schema}.staging_${target}` : '');
+      setStep(2);
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const save = async () => {
+    if (!selectedTable) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api('/api/config', {
+        method: 'POST',
+        body: JSON.stringify({
+          ...location,
+          ingestionGroup: group,
+          sourceTableName: `${selectedTable.table_schema}.${selectedTable.table_name}`,
+          stagingTableFqn: stagingFqn || null,
+          targetTableFqn: targetFqn,
+          ingestionType,
+          keyColumns: keyColumn === 'none' ? null : keyColumn,
+          watermarkColumn: watermarkColumn === 'none' ? null : watermarkColumn,
+          partitionColumn: partitionColumn === 'none' ? null : partitionColumn,
+          predicateColumn: predicateColumn === 'none' ? null : predicateColumn,
+          epicCsaEnabled: epicCsa,
+          jdbcUrl: connectionMode === 'jdbc' ? jdbcUrl : null,
+          jdbcUser: connectionMode === 'jdbc' ? jdbcUser : null,
+          jdbcSecretScope: connectionMode === 'jdbc' ? secretScope : null,
+          jdbcSecretKey: connectionMode === 'jdbc' ? secretKey : null,
+          connectionName: connectionMode === 'uc' ? connectionName : null,
+          watermarkThresholdMinutes: Number(threshold),
+          fetchSize: Number(fetchSize),
+          numPartitions: Number(partitions),
+          enabled: true,
+        }),
+      });
+      onSaved();
+      reset();
+    } catch (value) {
+      setError(errorMessage(value));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const filteredTables = tables.filter((table) =>
+    `${table.table_schema}.${table.table_name}`.toLowerCase().includes(tableFilter.toLowerCase())
+  );
+  const canContinue = Boolean(group && selectedTable);
+  const canLoadTables =
+    Boolean(database) &&
+    (connectionMode === 'uc' ? Boolean(connectionName) : Boolean(jdbcUrl && jdbcUser && secretScope && secretKey));
+
+  return (
+    <Dialog open={open} onOpenChange={changeOpen}>
+      <DialogContent className="max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-5xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Discover and configure a source table</DialogTitle>
+          <DialogDescription>
+            Step {step} of 2 ·{' '}
+            {step === 1
+              ? 'Connect, discover, and choose the replication mode.'
+              : 'Review inferred columns and runtime settings.'}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="wizard-progress" aria-label={`Step ${step} of 2`}>
+          <span style={{ width: `${step * 50}%` }} />
+        </div>
+        {error && <ErrorState message={error} />}
+        {step === 1 ? (
+          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,0.9fr)]">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Connection and ingestion group</CardTitle>
+                <CardDescription>
+                  Use an existing UC connection or discover directly with a JDBC URL and Databricks secret.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-4 md:grid-cols-2">
+                <ControlledField
+                  id="discover-group"
+                  label="Ingestion group"
+                  value={group}
+                  onChange={setGroup}
+                  required
+                />
+                <div>
+                  <Label htmlFor="connection-mode">Connection method</Label>
+                  <Select value={connectionMode} onValueChange={setConnectionMode}>
+                    <SelectTrigger id="connection-mode">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="uc">Existing UC connection</SelectItem>
+                      <SelectItem value="jdbc">Direct JDBC URL</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label htmlFor="database-type">Database type</Label>
+                  <Select value={databaseType} onValueChange={setDatabaseType}>
+                    <SelectTrigger id="database-type">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="sqlserver">SQL Server</SelectItem>
+                      <SelectItem value="postgresql">PostgreSQL</SelectItem>
+                      <SelectItem value="mysql">MySQL</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <ControlledField
+                  id="source-database"
+                  label="Database"
+                  value={database}
+                  onChange={setDatabase}
+                  required
+                />
+                {connectionMode === 'uc' ? (
+                  <ControlledField
+                    id="connection-name"
+                    label="UC connection name"
+                    value={connectionName}
+                    onChange={setConnectionName}
+                    required
+                  />
+                ) : (
+                  <>
+                    <div className="md:col-span-2">
+                      <ControlledField
+                        id="discover-jdbc-url"
+                        label="JDBC URL"
+                        value={jdbcUrl}
+                        onChange={setJdbcUrl}
+                        required
+                      />
+                    </div>
+                    <ControlledField
+                      id="discover-jdbc-user"
+                      label="JDBC user"
+                      value={jdbcUser}
+                      onChange={setJdbcUser}
+                      required
+                    />
+                    <div />
+                    <ControlledField
+                      id="discover-secret-scope"
+                      label="Password secret scope"
+                      value={secretScope}
+                      onChange={setSecretScope}
+                      required
+                    />
+                    <ControlledField
+                      id="discover-secret-key"
+                      label="Password secret key"
+                      value={secretKey}
+                      onChange={setSecretKey}
+                      required
+                    />
+                    <Alert className="md:col-span-2">
+                      <AlertTitle>Secret-backed authentication</AlertTitle>
+                      <AlertDescription>
+                        Do not include a password in the JDBC URL. Discovery creates and removes a temporary UC
+                        connection using this secret reference.
+                      </AlertDescription>
+                    </Alert>
+                  </>
+                )}
+                <Button
+                  type="button"
+                  className="md:col-span-2"
+                  onClick={() => void loadTables()}
+                  disabled={busy || !canLoadTables}
+                >
+                  {busy ? 'Loading tables…' : 'Load available tables'}
+                </Button>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Available tables</CardTitle>
+                <CardDescription>Select one table to replicate.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {busy && !tables.length ? (
+                  <Skeleton className="h-56" />
+                ) : !tables.length ? (
+                  <Empty>
+                    <EmptyHeader>
+                      <EmptyTitle>No tables loaded</EmptyTitle>
+                      <EmptyDescription>Enter a connection and database, then load tables.</EmptyDescription>
+                    </EmptyHeader>
+                  </Empty>
+                ) : (
+                  <>
+                    <Input
+                      aria-label="Filter available tables"
+                      placeholder="Filter schema or table"
+                      value={tableFilter}
+                      onChange={(event) => setTableFilter(event.target.value)}
+                      className="mb-3"
+                    />
+                    <div className="source-table-list">
+                      {filteredTables.map((table) => {
+                        const selected =
+                          selectedTable?.table_schema === table.table_schema &&
+                          selectedTable.table_name === table.table_name;
+                        return (
+                          <button
+                            type="button"
+                            key={`${table.table_schema}.${table.table_name}`}
+                            className={`source-table-option ${selected ? 'source-table-option-selected' : ''}`}
+                            onClick={() => setSelectedTable(table)}
+                          >
+                            <TableProperties className="h-4 w-4" />
+                            <span>
+                              {table.table_schema}.<strong>{table.table_name}</strong>
+                            </span>
+                            {selected && <CheckCircle2 className="ml-auto h-4 w-4" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+              </CardContent>
+            </Card>
+            <Card className="lg:col-span-2">
+              <CardHeader>
+                <CardTitle className="text-base">Replication mode</CardTitle>
+              </CardHeader>
+              <CardContent className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <Label htmlFor="discover-type">Load type</Label>
+                  <Select
+                    value={ingestionType}
+                    onValueChange={(value) => {
+                      setIngestionType(value);
+                      if (value === 'full') setEpicCsa(false);
+                    }}
+                  >
+                    <SelectTrigger id="discover-type">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="full">Initial / full load</SelectItem>
+                      <SelectItem value="incremental">Incremental</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <label className={`mode-toggle ${ingestionType === 'full' ? 'opacity-50' : ''}`}>
+                  <Checkbox
+                    checked={epicCsa}
+                    disabled={ingestionType === 'full'}
+                    onCheckedChange={(checked) => setEpicCsa(checked === true)}
+                  />
+                  <span>
+                    <strong>Use EPIC CSA</strong>
+                    <small>Uses change-sequence tracking instead of a timestamp watermark.</small>
+                  </span>
+                </label>
+              </CardContent>
+            </Card>
+          </div>
+        ) : (
+          <div className="space-y-5">
+            <Alert>
+              <CheckCircle2 className="h-4 w-4" />
+              <AlertTitle>Metadata inferred</AlertTitle>
+              <AlertDescription>
+                Primary-key constraints are preferred. Review every suggestion before saving.
+              </AlertDescription>
+            </Alert>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Keys and replication columns</CardTitle>
+                <CardDescription>
+                  {selectedTable?.table_schema}.{selectedTable?.table_name} · {columns.length} columns discovered
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="grid gap-4 md:grid-cols-2">
+                <ColumnSelect
+                  id="key-column"
+                  label="Key column(s)"
+                  value={keyColumn}
+                  columns={columns}
+                  onChange={setKeyColumn}
+                  allowCombined
+                />
+                <ColumnSelect
+                  id="watermark-column"
+                  label="Watermark column"
+                  value={watermarkColumn}
+                  columns={columns.filter((column) => isType(column, temporalTypes))}
+                  onChange={setWatermarkColumn}
+                  disabled={ingestionType === 'full' || epicCsa}
+                />
+                <ColumnSelect
+                  id="partition-column"
+                  label="Numeric partition column"
+                  value={partitionColumn}
+                  columns={columns.filter((column) => isType(column, numericTypes))}
+                  onChange={(value) => {
+                    setPartitionColumn(value);
+                    if (value !== 'none') setPredicateColumn('none');
+                  }}
+                />
+                <ColumnSelect
+                  id="predicate-column"
+                  label="String predicate column"
+                  value={predicateColumn}
+                  columns={columns.filter((column) => isType(column, stringTypes))}
+                  onChange={(value) => {
+                    setPredicateColumn(value);
+                    if (value !== 'none') setPartitionColumn('none');
+                  }}
+                />
+                <ControlledField
+                  id="target-fqn"
+                  label="Final target FQN"
+                  value={targetFqn}
+                  onChange={setTargetFqn}
+                  required
+                />
+                <ControlledField
+                  id="staging-fqn"
+                  label="Staging table FQN"
+                  value={stagingFqn}
+                  onChange={setStagingFqn}
+                />
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Optional runtime settings</CardTitle>
+              </CardHeader>
+              <CardContent className="grid gap-4 md:grid-cols-3">
+                <ControlledField
+                  id="discover-threshold"
+                  label="Watermark delay (minutes)"
+                  value={threshold}
+                  onChange={setThreshold}
+                  type="number"
+                />
+                <ControlledField
+                  id="discover-fetch-size"
+                  label="JDBC fetch size"
+                  value={fetchSize}
+                  onChange={setFetchSize}
+                  type="number"
+                />
+                <ControlledField
+                  id="discover-partitions"
+                  label="JDBC partitions"
+                  value={partitions}
+                  onChange={setPartitions}
+                  type="number"
+                />
+              </CardContent>
+            </Card>
+          </div>
+        )}
+        <DialogFooter className="gap-2">
+          <Button type="button" variant="outline" onClick={() => (step === 1 ? changeOpen(false) : setStep(1))}>
+            <ArrowLeft className="mr-2 h-4 w-4" />
+            {step === 1 ? 'Cancel' : 'Back'}
+          </Button>
+          {step === 1 ? (
+            <Button type="button" onClick={() => void continueToSettings()} disabled={busy || !canContinue}>
+              Review inferred settings
+              <ArrowRight className="ml-2 h-4 w-4" />
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              onClick={() => void save()}
+              disabled={
+                busy ||
+                !targetFqn ||
+                (ingestionType === 'incremental' && (keyColumn === 'none' || (!epicCsa && watermarkColumn === 'none')))
+              }
+            >
+              {busy ? 'Saving…' : 'Save configuration'}
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ControlledField({
+  id,
+  label,
+  value,
+  onChange,
+  required = false,
+  type = 'text',
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  required?: boolean;
+  type?: string;
+}) {
+  return (
+    <div>
+      <Label htmlFor={id}>{label}</Label>
+      <Input id={id} type={type} value={value} onChange={(event) => onChange(event.target.value)} required={required} />
+    </div>
+  );
+}
+function ColumnSelect({
+  id,
+  label,
+  value,
+  columns,
+  onChange,
+  disabled = false,
+  allowCombined = false,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  columns: SourceColumn[];
+  onChange: (value: string) => void;
+  disabled?: boolean;
+  allowCombined?: boolean;
+}) {
+  const hasCombined = allowCombined && value.includes(',');
+  return (
+    <div>
+      <Label htmlFor={id}>{label}</Label>
+      <Select value={value} onValueChange={onChange} disabled={disabled}>
+        <SelectTrigger id={id}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="none">None</SelectItem>
+          {hasCombined && <SelectItem value={value}>{value} (composite primary key)</SelectItem>}
+          {columns.map((column) => (
+            <SelectItem key={column.column_name} value={column.column_name}>
+              {column.column_name} · {column.data_type}
+              {column.is_primary_key === '1' ? ' · primary key' : ''}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
   );
 }
 
@@ -1046,7 +1670,9 @@ function JobsPage() {
                       ID {job.job_id} · created {displayTime(job.created_time)}
                     </CardDescription>
                   </div>
-                  <Badge variant={statusVariant(runStatus(job.runs[0]))}>{runStatus(job.runs[0]).replaceAll('_', ' ')}</Badge>
+                  <Badge variant={statusVariant(runStatus(job.runs[0]))}>
+                    {runStatus(job.runs[0]).replaceAll('_', ' ')}
+                  </Badge>
                 </div>
               </CardHeader>
               <CardContent className="space-y-5">
@@ -1080,7 +1706,10 @@ function JobsPage() {
                     <span>Newest on the right</span>
                   </div>
                   {job.runs.length ? (
-                    <div className="run-timeline" aria-label={`Recent run status for ${job.settings?.name ?? `job ${job.job_id}`}`}>
+                    <div
+                      className="run-timeline"
+                      aria-label={`Recent run status for ${job.settings?.name ?? `job ${job.job_id}`}`}
+                    >
                       {[...job.runs].reverse().map((recentRun) => {
                         const status = runStatus(recentRun);
                         const label = `${status.replaceAll('_', ' ')} · ${displayTime(recentRun.start_time)} · ${runDuration(recentRun)}`;
@@ -1104,10 +1733,13 @@ function JobsPage() {
                       })}
                     </div>
                   ) : (
-                    <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">No runs recorded yet.</p>
+                    <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+                      No runs recorded yet.
+                    </p>
                   )}
                   <p className="mt-2 text-xs text-muted-foreground">
-                    Latest: {job.runs[0] ? `${displayTime(job.runs[0].start_time)} · ${runDuration(job.runs[0])}` : 'Never run'}
+                    Latest:{' '}
+                    {job.runs[0] ? `${displayTime(job.runs[0].start_time)} · ${runDuration(job.runs[0])}` : 'Never run'}
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -1286,7 +1918,8 @@ function JobDialog({
                   <CardHeader className="pb-3">
                     <CardTitle className="text-base">Generated job</CardTitle>
                     <CardDescription>
-                      [{selectedGroup.ingestion_group}] Ingestion Pipeline · {selectedGroup.source_count} configured sources
+                      [{selectedGroup.ingestion_group}] Ingestion Pipeline · {selectedGroup.source_count} configured
+                      sources
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="grid gap-4 text-sm text-muted-foreground md:grid-cols-2">
@@ -1304,9 +1937,7 @@ function JobDialog({
                     </div>
                     <div className="min-w-0 space-y-1">
                       <div>ingestion_group</div>
-                      <div className="break-all font-mono text-xs text-foreground">
-                        {selectedGroup.ingestion_group}
-                      </div>
+                      <div className="break-all font-mono text-xs text-foreground">{selectedGroup.ingestion_group}</div>
                     </div>
                   </CardContent>
                 </Card>
@@ -1465,7 +2096,8 @@ function JobDialog({
                     <Input id="max-workers" name="maxWorkers" type="number" min="1" defaultValue="4" required />
                   </div>
                   <p className="text-xs text-muted-foreground md:col-span-2">
-                    The planner and ingestion workers share this autoscaling job cluster. The CDC pipeline task uses its own pipeline compute.
+                    The planner and ingestion workers share this autoscaling job cluster. The CDC pipeline task uses its
+                    own pipeline compute.
                   </p>
                 </div>
               </TabsContent>
@@ -1536,12 +2168,7 @@ function ScheduleFields({
             <span className="block font-medium">Schedule active</span>
             <span className="text-xs text-muted-foreground">Turn off to save the schedule in a paused state.</span>
           </span>
-          <Switch
-            checked={active}
-            onCheckedChange={onActiveChange}
-            aria-label="Schedule active"
-            disabled={!enabled}
-          />
+          <Switch checked={active} onCheckedChange={onActiveChange} aria-label="Schedule active" disabled={!enabled} />
         </label>
       </div>
     </div>

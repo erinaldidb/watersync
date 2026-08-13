@@ -207,6 +207,58 @@ body {
   background: color-mix(in oklch, var(--chart-2) 12%, var(--card));
   color: var(--chart-2);
 }
+.wizard-progress {
+  height: 0.3rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--muted);
+}
+.wizard-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+  transition: width 180ms ease;
+}
+.source-table-list {
+  max-height: 18rem;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+}
+.source-table-option {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.6rem;
+  border-bottom: 1px solid var(--border);
+  padding: 0.65rem 0.75rem;
+  color: var(--foreground);
+  text-align: left;
+}
+.source-table-option:last-child {
+  border-bottom: 0;
+}
+.source-table-option:hover {
+  background: var(--muted);
+}
+.source-table-option-selected {
+  background: color-mix(in oklch, var(--primary) 10%, var(--card));
+  color: var(--primary);
+}
+.mode-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+  padding: 0.7rem 0.8rem;
+}
+.mode-toggle small {
+  display: block;
+  margin-top: 0.15rem;
+  color: var(--muted-foreground);
+}
 
 .job-card {
   box-shadow: 0 4px 18px color-mix(in oklch, var(--foreground) 5%, transparent);

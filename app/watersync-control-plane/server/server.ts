@@ -1,31 +1,80 @@
 import { analytics, createApp, server } from '@databricks/appkit';
 import { WorkspaceClient, jobs, pipelines, sql as dbsql } from '@databricks/sdk-experimental';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
 const identifierPart = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
 const locationSchema = z.object({ catalog: identifierPart, schema: identifierPart });
-const configSchema = locationSchema.extend({
-  originalIngestionGroup: z.string().optional(),
-  originalSourceTableName: z.string().optional(),
-  ingestionGroup: z.string().min(1),
-  sourceTableName: z.string().min(1),
-  stagingTableFqn: z.string().nullable().optional(),
-  targetTableFqn: z.string().regex(/^[^.]+\.[^.]+\.[^.]+$/),
-  ingestionType: z.enum(['incremental', 'full']),
-  keyColumns: z.string().nullable().optional(),
-  watermarkColumn: z.string().nullable().optional(),
-  partitionColumn: z.string().nullable().optional(),
-  predicateColumn: z.string().nullable().optional(),
-  epicCsaEnabled: z.boolean(),
-  jdbcUrl: z.string().nullable().optional(),
-  jdbcUser: z.string().nullable().optional(),
-  jdbcSecretScope: z.string().nullable().optional(),
-  jdbcSecretKey: z.string().nullable().optional(),
-  connectionName: z.string().nullable().optional(),
-  watermarkThresholdMinutes: z.number().int().nonnegative(),
-  fetchSize: z.number().int().positive(),
-  numPartitions: z.number().int().positive(),
-  enabled: z.boolean(),
+const configSchema = locationSchema
+  .extend({
+    originalIngestionGroup: z.string().optional(),
+    originalSourceTableName: z.string().optional(),
+    ingestionGroup: z.string().min(1),
+    sourceTableName: z.string().min(1),
+    stagingTableFqn: z.string().nullable().optional(),
+    targetTableFqn: z.string().regex(/^[^.]+\.[^.]+\.[^.]+$/),
+    ingestionType: z.enum(['incremental', 'full']),
+    keyColumns: z.string().nullable().optional(),
+    watermarkColumn: z.string().nullable().optional(),
+    partitionColumn: z.string().nullable().optional(),
+    predicateColumn: z.string().nullable().optional(),
+    epicCsaEnabled: z.boolean(),
+    jdbcUrl: z.string().nullable().optional(),
+    jdbcUser: z.string().nullable().optional(),
+    jdbcSecretScope: z.string().nullable().optional(),
+    jdbcSecretKey: z.string().nullable().optional(),
+    connectionName: z.string().nullable().optional(),
+    watermarkThresholdMinutes: z.number().int().nonnegative(),
+    fetchSize: z.number().int().positive(),
+    numPartitions: z.number().int().positive(),
+    enabled: z.boolean(),
+  })
+  .superRefine((value, context) => {
+    if (value.ingestionType !== 'incremental') return;
+    if (!value.keyColumns?.trim()) {
+      context.addIssue({
+        code: 'custom',
+        path: ['keyColumns'],
+        message: 'Incremental ingestion requires a key column',
+      });
+    }
+    if (!value.epicCsaEnabled && !value.watermarkColumn?.trim()) {
+      context.addIssue({
+        code: 'custom',
+        path: ['watermarkColumn'],
+        message: 'Incremental ingestion requires a watermark column unless EPIC CSA is enabled',
+      });
+    }
+  });
+const sourceDatabaseType = z.enum(['postgresql', 'mysql', 'sqlserver']);
+const sourceDiscoverySchema = z
+  .object({
+    connectionName: z.string().trim().optional().default(''),
+    jdbcUrl: z.string().trim().optional().default(''),
+    jdbcUser: z.string().trim().optional().default(''),
+    jdbcSecretScope: z.string().trim().optional().default(''),
+    jdbcSecretKey: z.string().trim().optional().default(''),
+    database: z.string().trim().min(1),
+    databaseType: sourceDatabaseType,
+  })
+  .superRefine((value, context) => {
+    if (value.connectionName) return;
+    for (const field of ['jdbcUrl', 'jdbcUser', 'jdbcSecretScope', 'jdbcSecretKey'] as const) {
+      if (!value[field]) {
+        context.addIssue({ code: 'custom', path: [field], message: 'Required for direct JDBC discovery' });
+      }
+    }
+    if (/(?:password|pwd)\s*=/i.test(value.jdbcUrl)) {
+      context.addIssue({
+        code: 'custom',
+        path: ['jdbcUrl'],
+        message: 'Do not put passwords in the JDBC URL; use a Databricks secret scope and key',
+      });
+    }
+  });
+const sourceColumnsSchema = sourceDiscoverySchema.extend({
+  sourceSchema: z.string().trim().min(1),
+  table: z.string().trim().min(1),
 });
 const keySchema = locationSchema.extend({ ingestionGroup: z.string().min(1), sourceTableName: z.string().min(1) });
 const watermarkSchema = keySchema.extend({ lastWatermark: z.string().nullable(), status: z.string().min(1) });
@@ -59,7 +108,11 @@ const computeSchema = z
       if (!fieldValue) context.addIssue({ code: 'custom', path: [field], message: 'Required for a job cluster' });
     }
     if (value.maxWorkers < value.minWorkers) {
-      context.addIssue({ code: 'custom', path: ['maxWorkers'], message: 'Maximum workers must be at least the minimum' });
+      context.addIssue({
+        code: 'custom',
+        path: ['maxWorkers'],
+        message: 'Maximum workers must be at least the minimum',
+      });
     }
   });
 const jobPayloadSchema = locationSchema.extend({
@@ -117,6 +170,94 @@ async function execute(statement: string, parameters: dbsql.StatementParameterLi
   }
   return response;
 }
+
+const sqlLiteral = (value: string) => `'${value.replace(/'/g, "''")}'`;
+const responseRows = (response: Awaited<ReturnType<typeof execute>>) => {
+  const names = response.manifest?.schema?.columns?.map((column) => column.name ?? '') ?? [];
+  return (response.result?.data_array ?? []).map((values) =>
+    Object.fromEntries(names.map((name, index) => [name, values[index] ?? null]))
+  );
+};
+const remoteQuery = async (connectionName: string, database: string, query: string) =>
+  execute(`SELECT * FROM remote_query(:connection_name, database => :database, query => :remote_sql)`, [
+    parameter('connection_name', connectionName),
+    parameter('database', database),
+    parameter('remote_sql', query),
+  ]);
+
+type SourceDiscovery = z.infer<typeof sourceDiscoverySchema>;
+const jdbcEndpoint = (databaseType: SourceDiscovery['databaseType'], jdbcUrl: string) => {
+  const expectedPrefix = `jdbc:${databaseType === 'sqlserver' ? 'sqlserver' : databaseType}:`;
+  if (!jdbcUrl.toLowerCase().startsWith(expectedPrefix)) {
+    throw new Error(`JDBC URL must start with ${expectedPrefix}`);
+  }
+  if (databaseType === 'sqlserver') {
+    const match = /^jdbc:sqlserver:\/\/([^:;]+)(?::(\d+))?(?:;.*)?$/i.exec(jdbcUrl);
+    if (!match) throw new Error('Use a SQL Server JDBC URL such as jdbc:sqlserver://host:1433;databaseName=mydb');
+    return { host: match[1], port: match[2] ?? '1433' };
+  }
+  const match = /^jdbc:(?:postgresql|mysql):\/\/([^/:?;]+)(?::(\d+))?\/[^?;]+(?:[?;].*)?$/i.exec(jdbcUrl);
+  if (!match) throw new Error(`Use a ${databaseType} JDBC URL containing a host and database`);
+  return { host: match[1], port: match[2] ?? (databaseType === 'postgresql' ? '5432' : '3306') };
+};
+
+async function withDiscoveryConnection<T>(body: SourceDiscovery, action: (connectionName: string) => Promise<T>) {
+  if (body.connectionName) return action(body.connectionName);
+
+  const endpoint = jdbcEndpoint(body.databaseType, body.jdbcUrl);
+  const connectionName = `_watersync_discovery_${randomUUID().replace(/-/g, '')}`;
+  const connectionType = body.databaseType === 'sqlserver' ? 'SQLSERVER' : body.databaseType.toUpperCase();
+  await execute(`CREATE CONNECTION \`${connectionName}\` TYPE ${connectionType} OPTIONS (
+    host ${sqlLiteral(endpoint.host)},
+    port ${sqlLiteral(endpoint.port)},
+    user ${sqlLiteral(body.jdbcUser)},
+    password secret(${sqlLiteral(body.jdbcSecretScope)}, ${sqlLiteral(body.jdbcSecretKey)})
+  )`);
+  try {
+    return await action(connectionName);
+  } finally {
+    try {
+      await execute(`DROP CONNECTION IF EXISTS \`${connectionName}\``);
+    } catch (error) {
+      console.error(`Failed to remove temporary discovery connection ${connectionName}`, error);
+    }
+  }
+}
+
+const listTablesSql = (databaseType: z.infer<typeof sourceDatabaseType>) => {
+  const base = `SELECT ${databaseType === 'sqlserver' ? 'TOP 1000 ' : ''}TABLE_SCHEMA AS table_schema, TABLE_NAME AS table_name
+    FROM INFORMATION_SCHEMA.TABLES
+    WHERE TABLE_TYPE IN ('BASE TABLE', 'TABLE')
+    ORDER BY TABLE_SCHEMA, TABLE_NAME`;
+  return databaseType === 'sqlserver' ? base : `${base} LIMIT 1000`;
+};
+
+const columnsSql = (databaseType: z.infer<typeof sourceDatabaseType>, sourceSchema: string, table: string) => {
+  const schema = sqlLiteral(sourceSchema);
+  const tableNameValue = sqlLiteral(table);
+  const concat =
+    databaseType === 'mysql'
+      ? 'GROUP_CONCAT(k.COLUMN_NAME ORDER BY k.ORDINAL_POSITION)'
+      : databaseType === 'sqlserver'
+        ? "STRING_AGG(CAST(k.COLUMN_NAME AS VARCHAR(MAX)), ',') WITHIN GROUP (ORDER BY k.ORDINAL_POSITION)"
+        : "STRING_AGG(k.COLUMN_NAME, ',' ORDER BY k.ORDINAL_POSITION)";
+  return `SELECT c.COLUMN_NAME AS column_name, c.DATA_TYPE AS data_type,
+      c.IS_NULLABLE AS is_nullable, c.ORDINAL_POSITION AS ordinal_position,
+      CASE WHEN pk.primary_keys IS NOT NULL AND CONCAT(',', pk.primary_keys, ',') LIKE CONCAT('%,', c.COLUMN_NAME, ',%')
+        THEN 1 ELSE 0 END AS is_primary_key
+    FROM INFORMATION_SCHEMA.COLUMNS c
+    LEFT JOIN (
+      SELECT ${concat} AS primary_keys
+      FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
+      JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE k
+        ON tc.CONSTRAINT_NAME = k.CONSTRAINT_NAME
+        AND tc.TABLE_SCHEMA = k.TABLE_SCHEMA AND tc.TABLE_NAME = k.TABLE_NAME
+      WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+        AND tc.TABLE_SCHEMA = ${schema} AND tc.TABLE_NAME = ${tableNameValue}
+    ) pk ON 1 = 1
+    WHERE c.TABLE_SCHEMA = ${schema} AND c.TABLE_NAME = ${tableNameValue}
+    ORDER BY c.ORDINAL_POSITION`;
+};
 
 async function groupHasEnabledIncrementalSource(catalog: string, schema: string, ingestionGroup: string) {
   const response = await execute(
@@ -212,6 +353,30 @@ await createApp({
   plugins: [analytics(), server()],
   onPluginsReady(appkit) {
     appkit.server.extend((app) => {
+      app.post('/api/source-tables', async (req, res) => {
+        try {
+          const body = sourceDiscoverySchema.parse(req.body);
+          const response = await withDiscoveryConnection(body, (connectionName) =>
+            remoteQuery(connectionName, body.database, listTablesSql(body.databaseType))
+          );
+          res.json({ tables: responseRows(response) });
+        } catch (error) {
+          handleError(res, error);
+        }
+      });
+
+      app.post('/api/source-columns', async (req, res) => {
+        try {
+          const body = sourceColumnsSchema.parse(req.body);
+          const response = await withDiscoveryConnection(body, (connectionName) =>
+            remoteQuery(connectionName, body.database, columnsSql(body.databaseType, body.sourceSchema, body.table))
+          );
+          res.json({ columns: responseRows(response) });
+        } catch (error) {
+          handleError(res, error);
+        }
+      });
+
       app.post('/api/config', async (req, res) => {
         try {
           const body = configSchema.parse(req.body);
