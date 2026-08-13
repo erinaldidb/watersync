@@ -741,6 +741,7 @@ function DiscoveryDialog({
     setInferenceProgress(null);
   };
   const changeOpen = (value: boolean) => {
+    if (!value && busy) return;
     if (!value) reset();
     onOpenChange(value);
   };
@@ -796,8 +797,8 @@ function DiscoveryDialog({
     setBusy(true);
     setError(null);
     setInferenceProgress({ completed: 0, total: selectedTables.length });
+    setDrafts([]);
     try {
-      const discovered: Array<{ sourceSchema: string; table: string; columns: SourceColumn[] }> = [];
       for (let offset = 0; offset < selectedTables.length; offset += 10) {
         const page = selectedTables.slice(offset, offset + 10);
         const result = await api<{
@@ -815,14 +816,7 @@ function DiscoveryDialog({
             tables: page.map((table) => ({ sourceSchema: table.table_schema, table: table.table_name })),
           }),
         });
-        discovered.push(...result.tables);
-        setInferenceProgress({
-          completed: Math.min(offset + page.length, selectedTables.length),
-          total: selectedTables.length,
-        });
-      }
-      setDrafts(
-        discovered.map((resultTable) => {
+        const pageDrafts = result.tables.map((resultTable) => {
           const table = { table_schema: resultTable.sourceSchema, table_name: resultTable.table };
           const target = safeTargetName(resultTable.table);
           return {
@@ -832,9 +826,14 @@ function DiscoveryDialog({
             targetFqn: `${baseTargetFqn.replace(/\.$/, '')}.${target}`,
             stagingFqn: ingestionType === 'incremental' ? `${baseStagingFqn.replace(/\.$/, '')}.staging_${target}` : '',
           };
-        })
-      );
-      setStep(2);
+        });
+        setDrafts((current) => [...current, ...pageDrafts]);
+        setInferenceProgress({
+          completed: Math.min(offset + page.length, selectedTables.length),
+          total: selectedTables.length,
+        });
+        if (offset === 0) setStep(2);
+      }
       setInferenceProgress(null);
     } catch (value) {
       setError(errorMessage(value));
@@ -912,6 +911,7 @@ function DiscoveryDialog({
     );
   };
   const draftsValid =
+    !inferenceProgress &&
     Boolean(baseTargetFqn && (ingestionType === 'full' || baseStagingFqn)) &&
     drafts.every(
       (draft) =>
@@ -1211,6 +1211,7 @@ function DiscoveryDialog({
                     value={baseTargetFqn}
                     onChange={updateBaseTarget}
                     required
+                    disabled={Boolean(inferenceProgress)}
                   />
                   <ControlledField
                     id="base-staging-fqn"
@@ -1218,6 +1219,7 @@ function DiscoveryDialog({
                     value={baseStagingFqn}
                     onChange={updateBaseStaging}
                     required={ingestionType === 'incremental'}
+                    disabled={Boolean(inferenceProgress)}
                   />
                   <p className="text-xs text-muted-foreground md:col-span-2">
                     WaterSync appends each normalized table name. Staging tables also receive the staging_ prefix.
@@ -1321,7 +1323,12 @@ function DiscoveryDialog({
           </div>
         )}
         <DialogFooter className="gap-2">
-          <Button type="button" variant="outline" onClick={() => (step === 1 ? changeOpen(false) : setStep(1))}>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={busy}
+            onClick={() => (step === 1 ? changeOpen(false) : setStep(1))}
+          >
             <ArrowLeft className="mr-2 h-4 w-4" />
             {step === 1 ? 'Cancel' : 'Back'}
           </Button>
@@ -1334,7 +1341,11 @@ function DiscoveryDialog({
             </Button>
           ) : (
             <Button type="button" onClick={() => void save()} disabled={busy || !draftsValid}>
-              {busy ? 'Saving…' : `Save ${drafts.length} configuration${drafts.length === 1 ? '' : 's'}`}
+              {inferenceProgress
+                ? `Waiting for ${inferenceProgress.total - inferenceProgress.completed} table${inferenceProgress.total - inferenceProgress.completed === 1 ? '' : 's'}`
+                : busy
+                  ? 'Saving…'
+                  : `Save ${drafts.length} configuration${drafts.length === 1 ? '' : 's'}`}
             </Button>
           )}
         </DialogFooter>
@@ -1350,6 +1361,7 @@ function ControlledField({
   onChange,
   required = false,
   type = 'text',
+  disabled = false,
 }: {
   id: string;
   label: string;
@@ -1357,11 +1369,19 @@ function ControlledField({
   onChange: (value: string) => void;
   required?: boolean;
   type?: string;
+  disabled?: boolean;
 }) {
   return (
     <div className="space-y-1.5">
       <Label htmlFor={id}>{label}</Label>
-      <Input id={id} type={type} value={value} onChange={(event) => onChange(event.target.value)} required={required} />
+      <Input
+        id={id}
+        type={type}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        required={required}
+        disabled={disabled}
+      />
     </div>
   );
 }
