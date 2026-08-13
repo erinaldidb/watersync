@@ -145,6 +145,7 @@ type TableDraft = {
   targetFqn: string;
   stagingFqn: string;
 };
+type InferenceProgress = { completed: number; total: number };
 
 const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...init });
@@ -705,6 +706,7 @@ function DiscoveryDialog({
 }) {
   const [step, setStep] = useState(1);
   const [busy, setBusy] = useState(false);
+  const [inferenceProgress, setInferenceProgress] = useState<InferenceProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [group, setGroup] = useState('');
   const [databaseType, setDatabaseType] = useState('sqlserver');
@@ -736,6 +738,7 @@ function DiscoveryDialog({
     setTableFilter('');
     setBaseTargetFqn(`${location.catalog}.${location.schema}`);
     setBaseStagingFqn(`${location.catalog}.${location.schema}`);
+    setInferenceProgress(null);
   };
   const changeOpen = (value: boolean) => {
     if (!value) reset();
@@ -743,6 +746,7 @@ function DiscoveryDialog({
   };
   const loadTables = async () => {
     setBusy(true);
+    setInferenceProgress(null);
     setError(null);
     setSelectedTables([]);
     try {
@@ -791,24 +795,34 @@ function DiscoveryDialog({
     if (!selectedTables.length) return;
     setBusy(true);
     setError(null);
+    setInferenceProgress({ completed: 0, total: selectedTables.length });
     try {
-      const result = await api<{
-        tables: Array<{ sourceSchema: string; table: string; columns: SourceColumn[] }>;
-      }>('/api/source-columns-batch', {
-        method: 'POST',
-        body: JSON.stringify({
-          connectionName: connectionMode === 'uc' ? connectionName : '',
-          jdbcUrl: connectionMode === 'jdbc' ? jdbcUrl : '',
-          jdbcUser: connectionMode === 'jdbc' ? jdbcUser : '',
-          jdbcSecretScope: connectionMode === 'jdbc' ? secretScope : '',
-          jdbcSecretKey: connectionMode === 'jdbc' ? secretKey : '',
-          database,
-          databaseType,
-          tables: selectedTables.map((table) => ({ sourceSchema: table.table_schema, table: table.table_name })),
-        }),
-      });
+      const discovered: Array<{ sourceSchema: string; table: string; columns: SourceColumn[] }> = [];
+      for (let offset = 0; offset < selectedTables.length; offset += 10) {
+        const page = selectedTables.slice(offset, offset + 10);
+        const result = await api<{
+          tables: Array<{ sourceSchema: string; table: string; columns: SourceColumn[] }>;
+        }>('/api/source-columns-batch', {
+          method: 'POST',
+          body: JSON.stringify({
+            connectionName: connectionMode === 'uc' ? connectionName : '',
+            jdbcUrl: connectionMode === 'jdbc' ? jdbcUrl : '',
+            jdbcUser: connectionMode === 'jdbc' ? jdbcUser : '',
+            jdbcSecretScope: connectionMode === 'jdbc' ? secretScope : '',
+            jdbcSecretKey: connectionMode === 'jdbc' ? secretKey : '',
+            database,
+            databaseType,
+            tables: page.map((table) => ({ sourceSchema: table.table_schema, table: table.table_name })),
+          }),
+        });
+        discovered.push(...result.tables);
+        setInferenceProgress({
+          completed: Math.min(offset + page.length, selectedTables.length),
+          total: selectedTables.length,
+        });
+      }
       setDrafts(
-        result.tables.map((resultTable) => {
+        discovered.map((resultTable) => {
           const table = { table_schema: resultTable.sourceSchema, table_name: resultTable.table };
           const target = safeTargetName(resultTable.table);
           return {
@@ -821,6 +835,7 @@ function DiscoveryDialog({
         })
       );
       setStep(2);
+      setInferenceProgress(null);
     } catch (value) {
       setError(errorMessage(value));
     } finally {
@@ -920,6 +935,16 @@ function DiscoveryDialog({
           <span style={{ width: `${step * 50}%` }} />
         </div>
         {error && <ErrorState message={error} />}
+        {inferenceProgress && (
+          <Alert>
+            <RefreshCw className={`h-4 w-4 ${busy ? 'animate-spin' : ''}`} />
+            <AlertTitle>Inspecting table metadata</AlertTitle>
+            <AlertDescription>
+              {inferenceProgress.completed} of {inferenceProgress.total} tables inspected · pages of 10, four concurrent
+              queries per page.
+            </AlertDescription>
+          </Alert>
+        )}
         {step === 1 ? (
           <div className="space-y-5">
             <Card>
@@ -1301,7 +1326,9 @@ function DiscoveryDialog({
           </Button>
           {step === 1 ? (
             <Button type="button" onClick={() => void continueToSettings()} disabled={busy || !canContinue}>
-              Review inferred settings
+              {busy && inferenceProgress
+                ? `Inspecting ${inferenceProgress.completed}/${inferenceProgress.total}`
+                : 'Review inferred settings'}
               <ArrowRight className="ml-2 h-4 w-4" />
             </Button>
           ) : (

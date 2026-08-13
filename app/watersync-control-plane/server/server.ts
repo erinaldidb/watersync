@@ -80,7 +80,7 @@ const sourceColumnsBatchSchema = sourceDiscoverySchema.extend({
   tables: z
     .array(z.object({ sourceSchema: z.string().trim().min(1), table: z.string().trim().min(1) }))
     .min(1)
-    .max(100),
+    .max(10),
 });
 const keySchema = locationSchema.extend({ ingestionGroup: z.string().min(1), sourceTableName: z.string().min(1) });
 const watermarkSchema = keySchema.extend({ lastWatermark: z.string().nullable(), status: z.string().min(1) });
