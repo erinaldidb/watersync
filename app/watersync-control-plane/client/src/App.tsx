@@ -723,6 +723,8 @@ function DiscoveryDialog({
   const [ingestionType, setIngestionType] = useState('incremental');
   const [epicCsa, setEpicCsa] = useState(false);
   const [drafts, setDrafts] = useState<TableDraft[]>([]);
+  const [reviewPage, setReviewPage] = useState(0);
+  const [confirmedPages, setConfirmedPages] = useState<number[]>([]);
   const [baseTargetFqn, setBaseTargetFqn] = useState(`${location.catalog}.${location.schema}`);
   const [baseStagingFqn, setBaseStagingFqn] = useState(`${location.catalog}.${location.schema}`);
   const [threshold, setThreshold] = useState('5');
@@ -735,6 +737,8 @@ function DiscoveryDialog({
     setTables([]);
     setSelectedTables([]);
     setDrafts([]);
+    setReviewPage(0);
+    setConfirmedPages([]);
     setTableFilter('');
     setBaseTargetFqn(`${location.catalog}.${location.schema}`);
     setBaseStagingFqn(`${location.catalog}.${location.schema}`);
@@ -798,6 +802,8 @@ function DiscoveryDialog({
     setError(null);
     setInferenceProgress({ completed: 0, total: selectedTables.length });
     setDrafts([]);
+    setReviewPage(0);
+    setConfirmedPages([]);
     try {
       for (let offset = 0; offset < selectedTables.length; offset += 10) {
         const page = selectedTables.slice(offset, offset + 10);
@@ -889,12 +895,15 @@ function DiscoveryDialog({
     connectionMode === 'uc'
       ? Boolean(connectionName)
       : Boolean(database && jdbcUrl && jdbcUser && secretScope && secretKey);
-  const updateDraft = (index: number, changes: Partial<TableDraft>) =>
+  const updateDraft = (index: number, changes: Partial<TableDraft>) => {
+    setConfirmedPages((current) => current.filter((page) => page !== Math.floor(index / 10)));
     setDrafts((current) =>
       current.map((draft, draftIndex) => (draftIndex === index ? { ...draft, ...changes } : draft))
     );
+  };
   const updateBaseTarget = (value: string) => {
     setBaseTargetFqn(value);
+    setConfirmedPages([]);
     const base = value.replace(/\.$/, '');
     setDrafts((current) =>
       current.map((draft) => ({ ...draft, targetFqn: `${base}.${safeTargetName(draft.table.table_name)}` }))
@@ -902,6 +911,7 @@ function DiscoveryDialog({
   };
   const updateBaseStaging = (value: string) => {
     setBaseStagingFqn(value);
+    setConfirmedPages([]);
     const base = value.replace(/\.$/, '');
     setDrafts((current) =>
       current.map((draft) => ({
@@ -910,14 +920,75 @@ function DiscoveryDialog({
       }))
     );
   };
-  const draftsValid =
-    !inferenceProgress &&
-    Boolean(baseTargetFqn && (ingestionType === 'full' || baseStagingFqn)) &&
-    drafts.every(
-      (draft) =>
-        draft.targetFqn &&
+  const draftValid = (draft: TableDraft) =>
+    Boolean(
+      draft.targetFqn &&
         (ingestionType === 'full' || (draft.keyColumn !== 'none' && (epicCsa || draft.watermarkColumn !== 'none')))
     );
+  const reviewPageCount = Math.ceil(drafts.length / 10);
+  const reviewPageStart = reviewPage * 10;
+  const visibleDrafts = drafts.slice(reviewPageStart, reviewPageStart + 10);
+  const reviewPageConfirmed = confirmedPages.includes(reviewPage);
+  const reviewPageValid =
+    Boolean(baseTargetFqn && (ingestionType === 'full' || baseStagingFqn)) && visibleDrafts.every(draftValid);
+  const allPagesConfirmed =
+    reviewPageCount > 0 &&
+    Array.from({ length: reviewPageCount }, (_, page) => page).every((page) => confirmedPages.includes(page));
+  const draftsValid =
+    !inferenceProgress &&
+    allPagesConfirmed &&
+    Boolean(baseTargetFqn && (ingestionType === 'full' || baseStagingFqn)) &&
+    drafts.every(draftValid);
+  const confirmCurrentPage = () =>
+    setConfirmedPages((current) => (current.includes(reviewPage) ? current : [...current, reviewPage]));
+  const renderReviewNavigation = () => (
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/30 p-3">
+      <div>
+        <div className="text-sm font-medium">
+          Tables {reviewPageStart + 1}–{reviewPageStart + visibleDrafts.length} of {drafts.length}
+        </div>
+        <div className="text-xs text-muted-foreground">
+          Page {reviewPage + 1} of {reviewPageCount} · up to 10 tables per confirmation
+        </div>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={reviewPage === 0}
+          onClick={() => setReviewPage((page) => Math.max(0, page - 1))}
+        >
+          Previous
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant={reviewPageConfirmed ? 'outline' : 'default'}
+          disabled={!reviewPageValid || reviewPageConfirmed}
+          onClick={confirmCurrentPage}
+        >
+          {reviewPageConfirmed ? (
+            <>
+              <CheckCircle2 className="mr-2 h-4 w-4" />
+              Confirmed
+            </>
+          ) : (
+            `Confirm ${visibleDrafts.length} tables`
+          )}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={!reviewPageConfirmed || reviewPage >= reviewPageCount - 1}
+          onClick={() => setReviewPage((page) => Math.min(reviewPageCount - 1, page + 1))}
+        >
+          Next
+        </Button>
+      </div>
+    </div>
+  );
 
   return (
     <Dialog open={open} onOpenChange={changeOpen}>
@@ -1198,9 +1269,10 @@ function DiscoveryDialog({
             </Alert>
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">Review {drafts.length} table configurations</CardTitle>
+                <CardTitle className="text-base">Review table configurations</CardTitle>
                 <CardDescription>
-                  Each table keeps its own inferred key, watermark, partitioning, and target.
+                  Confirm each page before continuing. Editing a confirmed table requires that page to be confirmed
+                  again.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -1225,71 +1297,79 @@ function DiscoveryDialog({
                     WaterSync appends each normalized table name. Staging tables also receive the staging_ prefix.
                   </p>
                 </div>
-                {drafts.map((draft, index) => (
-                  <div className="rounded-lg border p-4" key={`${draft.table.table_schema}.${draft.table.table_name}`}>
-                    <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-                      <div className="font-mono text-sm font-semibold">
-                        {draft.table.table_schema}.{draft.table.table_name}
+                {renderReviewNavigation()}
+                {visibleDrafts.map((draft, pageIndex) => {
+                  const index = reviewPageStart + pageIndex;
+                  return (
+                    <div
+                      className="rounded-lg border p-4"
+                      key={`${draft.table.table_schema}.${draft.table.table_name}`}
+                    >
+                      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+                        <div className="font-mono text-sm font-semibold">
+                          {draft.table.table_schema}.{draft.table.table_name}
+                        </div>
+                        <Badge variant="outline">{draft.columns.length} columns</Badge>
                       </div>
-                      <Badge variant="outline">{draft.columns.length} columns</Badge>
+                      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                        <ColumnSelect
+                          id={`key-column-${index}`}
+                          label="Key column(s)"
+                          value={draft.keyColumn}
+                          columns={draft.columns}
+                          onChange={(value) => updateDraft(index, { keyColumn: value })}
+                          allowCombined
+                        />
+                        <ColumnSelect
+                          id={`watermark-column-${index}`}
+                          label="Watermark column"
+                          value={draft.watermarkColumn}
+                          columns={draft.columns.filter((column) => isType(column, temporalTypes))}
+                          onChange={(value) => updateDraft(index, { watermarkColumn: value })}
+                          disabled={ingestionType === 'full' || epicCsa}
+                        />
+                        <ColumnSelect
+                          id={`partition-column-${index}`}
+                          label="Numeric partition column"
+                          value={draft.partitionColumn}
+                          columns={draft.columns.filter((column) => isType(column, numericTypes))}
+                          onChange={(value) =>
+                            updateDraft(index, {
+                              partitionColumn: value,
+                              ...(value !== 'none' ? { predicateColumn: 'none' } : {}),
+                            })
+                          }
+                        />
+                        <ColumnSelect
+                          id={`predicate-column-${index}`}
+                          label="String predicate column"
+                          value={draft.predicateColumn}
+                          columns={draft.columns.filter((column) => isType(column, stringTypes))}
+                          onChange={(value) =>
+                            updateDraft(index, {
+                              predicateColumn: value,
+                              ...(value !== 'none' ? { partitionColumn: 'none' } : {}),
+                            })
+                          }
+                        />
+                        <ControlledField
+                          id={`target-fqn-${index}`}
+                          label="Final target FQN"
+                          value={draft.targetFqn}
+                          onChange={(value) => updateDraft(index, { targetFqn: value })}
+                          required
+                        />
+                        <ControlledField
+                          id={`staging-fqn-${index}`}
+                          label="Staging table FQN"
+                          value={draft.stagingFqn}
+                          onChange={(value) => updateDraft(index, { stagingFqn: value })}
+                        />
+                      </div>
                     </div>
-                    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-                      <ColumnSelect
-                        id={`key-column-${index}`}
-                        label="Key column(s)"
-                        value={draft.keyColumn}
-                        columns={draft.columns}
-                        onChange={(value) => updateDraft(index, { keyColumn: value })}
-                        allowCombined
-                      />
-                      <ColumnSelect
-                        id={`watermark-column-${index}`}
-                        label="Watermark column"
-                        value={draft.watermarkColumn}
-                        columns={draft.columns.filter((column) => isType(column, temporalTypes))}
-                        onChange={(value) => updateDraft(index, { watermarkColumn: value })}
-                        disabled={ingestionType === 'full' || epicCsa}
-                      />
-                      <ColumnSelect
-                        id={`partition-column-${index}`}
-                        label="Numeric partition column"
-                        value={draft.partitionColumn}
-                        columns={draft.columns.filter((column) => isType(column, numericTypes))}
-                        onChange={(value) =>
-                          updateDraft(index, {
-                            partitionColumn: value,
-                            ...(value !== 'none' ? { predicateColumn: 'none' } : {}),
-                          })
-                        }
-                      />
-                      <ColumnSelect
-                        id={`predicate-column-${index}`}
-                        label="String predicate column"
-                        value={draft.predicateColumn}
-                        columns={draft.columns.filter((column) => isType(column, stringTypes))}
-                        onChange={(value) =>
-                          updateDraft(index, {
-                            predicateColumn: value,
-                            ...(value !== 'none' ? { partitionColumn: 'none' } : {}),
-                          })
-                        }
-                      />
-                      <ControlledField
-                        id={`target-fqn-${index}`}
-                        label="Final target FQN"
-                        value={draft.targetFqn}
-                        onChange={(value) => updateDraft(index, { targetFqn: value })}
-                        required
-                      />
-                      <ControlledField
-                        id={`staging-fqn-${index}`}
-                        label="Staging table FQN"
-                        value={draft.stagingFqn}
-                        onChange={(value) => updateDraft(index, { stagingFqn: value })}
-                      />
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
+                {renderReviewNavigation()}
               </CardContent>
             </Card>
             <Card>
@@ -1343,9 +1423,11 @@ function DiscoveryDialog({
             <Button type="button" onClick={() => void save()} disabled={busy || !draftsValid}>
               {inferenceProgress
                 ? `Waiting for ${inferenceProgress.total - inferenceProgress.completed} table${inferenceProgress.total - inferenceProgress.completed === 1 ? '' : 's'}`
-                : busy
-                  ? 'Saving…'
-                  : `Save ${drafts.length} configuration${drafts.length === 1 ? '' : 's'}`}
+                : !allPagesConfirmed
+                  ? `Confirm ${reviewPageCount - confirmedPages.length} page${reviewPageCount - confirmedPages.length === 1 ? '' : 's'}`
+                  : busy
+                    ? 'Saving…'
+                    : `Save ${drafts.length} configuration${drafts.length === 1 ? '' : 's'}`}
             </Button>
           )}
         </DialogFooter>
