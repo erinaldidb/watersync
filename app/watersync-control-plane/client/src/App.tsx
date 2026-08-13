@@ -856,7 +856,7 @@ function DiscoveryDialog({
 
   return (
     <Dialog open={open} onOpenChange={changeOpen}>
-      <DialogContent className="max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] max-w-5xl overflow-y-auto">
+      <DialogContent className="max-h-[calc(100vh-2rem)] w-[calc(100vw-2rem)] overflow-y-auto sm:max-w-7xl 2xl:max-w-[90rem]">
         <DialogHeader>
           <DialogTitle>Discover and configure a source table</DialogTitle>
           <DialogDescription>
@@ -871,7 +871,7 @@ function DiscoveryDialog({
         </div>
         {error && <ErrorState message={error} />}
         {step === 1 ? (
-          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,0.9fr)]">
+          <div className="grid gap-6 lg:grid-cols-[minmax(0,1.35fr)_minmax(20rem,1fr)]">
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">Connection and ingestion group</CardTitle>
@@ -920,13 +920,15 @@ function DiscoveryDialog({
                   required
                 />
                 {connectionMode === 'uc' ? (
-                  <ControlledField
-                    id="connection-name"
-                    label="UC connection name"
-                    value={connectionName}
-                    onChange={setConnectionName}
-                    required
-                  />
+                  <div className="md:col-span-2">
+                    <ControlledField
+                      id="connection-name"
+                      label="UC connection name"
+                      value={connectionName}
+                      onChange={setConnectionName}
+                      required
+                    />
+                  </div>
                 ) : (
                   <>
                     <div className="md:col-span-2">
