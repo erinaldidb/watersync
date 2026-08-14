@@ -41,6 +41,7 @@ class UnityCatalogSetup:
               partition_column STRING COMMENT 'Numeric JDBC partition column',
               predicate_column STRING COMMENT 'String JDBC predicate-partition column',
               epic_csa_enabled BOOLEAN COMMENT 'True when EPIC CSA mode is enabled',
+              auto_cdc_from_snapshot BOOLEAN COMMENT 'Use snapshot CDC for full-load sources',
               jdbc_url STRING COMMENT 'JDBC URL; leave empty when using a UC connection',
               jdbc_user STRING COMMENT 'JDBC username',
               jdbc_secret_scope STRING COMMENT 'Secret scope containing the JDBC password',
@@ -60,6 +61,7 @@ class UnityCatalogSetup:
         existing = {field.name for field in self.spark.table(self.config_table).schema.fields}
         additions = {
             "target_table_fqn": "STRING COMMENT 'Final destination in catalog.schema.table format'",
+            "auto_cdc_from_snapshot": "BOOLEAN COMMENT 'Use snapshot CDC for full-load sources'",
             "jdbc_url": "STRING COMMENT 'JDBC URL; leave empty when using a UC connection'",
             "jdbc_user": "STRING COMMENT 'JDBC username'",
             "jdbc_secret_scope": "STRING COMMENT 'Secret scope containing the JDBC password'",

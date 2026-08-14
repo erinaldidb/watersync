@@ -27,6 +27,9 @@ class FakeDp:
     def create_auto_cdc_flow(self, **kwargs) -> None:
         self.flows.append(kwargs)
 
+    def create_auto_cdc_from_snapshot_flow(self, **kwargs) -> None:
+        self.flows.append(kwargs)
+
 
 class PipelineContractTest(unittest.TestCase):
     def test_target_fqn_requires_three_parts(self) -> None:
@@ -47,6 +50,7 @@ class PipelineContractTest(unittest.TestCase):
                 "key_columns": "order_id",
                 "watermark_column": None,
                 "epic_csa_enabled": False,
+                "auto_cdc_from_snapshot": False,
             }
         ]
 
@@ -69,6 +73,7 @@ class PipelineContractTest(unittest.TestCase):
                 "key_columns": "order_id",
                 "watermark_column": "updated_at",
                 "epic_csa_enabled": False,
+                "auto_cdc_from_snapshot": False,
             }
         ]
 
@@ -77,6 +82,27 @@ class PipelineContractTest(unittest.TestCase):
 
         self.assertEqual(dp.tables, ["gold.sales.orders_scd2"])
         self.assertEqual(dp.flows[0]["target"], "gold.sales.orders_scd2")
+
+    def test_flagged_full_config_uses_snapshot_cdc(self) -> None:
+        dp = FakeDp()
+        builder = CdcScd2PipelineBuilder(None, dp, "meta.config.jdbc_ingestion_config", "group")
+        builder.load_configs = lambda: [{
+            "ingestion_group": "group",
+            "source_table_name": "source.orders",
+            "staging_table_fqn": "bronze.sales.orders_snapshot",
+            "target_table_fqn": "gold.sales.orders_scd2",
+            "ingestion_type": "full",
+            "key_columns": "order_id",
+            "watermark_column": None,
+            "epic_csa_enabled": False,
+            "auto_cdc_from_snapshot": True,
+        }]
+
+        builder.build()
+
+        self.assertEqual(dp.tables, ["gold.sales.orders_scd2"])
+        self.assertEqual(dp.flows[0]["target"], "gold.sales.orders_scd2")
+        self.assertEqual(dp.flows[0]["keys"], ["order_id"])
 
 
 if __name__ == "__main__":

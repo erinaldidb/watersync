@@ -25,6 +25,7 @@ declare module '@databricks/appkit-ui/react' {
         partition_column: string | null;
         predicate_column: string | null;
         epic_csa_enabled: boolean;
+        auto_cdc_from_snapshot: boolean;
         jdbc_url: string | null;
         jdbc_user: string | null;
         jdbc_secret_scope: string | null;

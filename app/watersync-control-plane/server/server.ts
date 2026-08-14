@@ -19,6 +19,7 @@ const configSchema = locationSchema
     partitionColumn: z.string().nullable().optional(),
     predicateColumn: z.string().nullable().optional(),
     epicCsaEnabled: z.boolean(),
+    autoCdcFromSnapshot: z.boolean(),
     jdbcUrl: z.string().nullable().optional(),
     jdbcUser: z.string().nullable().optional(),
     jdbcSecretScope: z.string().nullable().optional(),
@@ -30,6 +31,18 @@ const configSchema = locationSchema
     enabled: z.boolean(),
   })
   .superRefine((value, context) => {
+    if (value.epicCsaEnabled && value.ingestionType !== 'incremental') {
+      context.addIssue({ code: 'custom', path: ['epicCsaEnabled'], message: 'EPIC CSA requires incremental ingestion' });
+    }
+    if (value.autoCdcFromSnapshot && value.ingestionType !== 'full') {
+      context.addIssue({ code: 'custom', path: ['autoCdcFromSnapshot'], message: 'Snapshot CDC requires full ingestion' });
+    }
+    if (value.autoCdcFromSnapshot && !value.stagingTableFqn?.trim()) {
+      context.addIssue({ code: 'custom', path: ['stagingTableFqn'], message: 'Snapshot CDC requires a staging table' });
+    }
+    if (value.autoCdcFromSnapshot && !value.keyColumns?.trim()) {
+      context.addIssue({ code: 'custom', path: ['keyColumns'], message: 'Snapshot CDC requires key columns' });
+    }
     if (value.ingestionType !== 'incremental') return;
     if (!value.keyColumns?.trim()) {
       context.addIssue({
@@ -355,9 +368,11 @@ const columnsBatchSql = (
     ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION`;
 };
 
-async function groupHasEnabledIncrementalSource(catalog: string, schema: string, ingestionGroup: string) {
+async function groupNeedsCdcPipeline(catalog: string, schema: string, ingestionGroup: string) {
   const response = await execute(
-    `SELECT count_if(coalesce(enabled, true) AND lower(ingestion_type) = 'incremental') > 0
+    `SELECT count_if(coalesce(enabled, true) AND (
+       lower(ingestion_type) = 'incremental' OR coalesce(auto_cdc_from_snapshot, false)
+     )) > 0
      FROM ${tableName(catalog, schema, 'jdbc_ingestion_config')}
      WHERE ingestion_group = :ingestion_group`,
     [parameter('ingestion_group', ingestionGroup)]
@@ -533,17 +548,18 @@ await createApp({
                ingestion_type=:ingestion_type, key_columns=:key_columns,
                watermark_column=:watermark_column, partition_column=:partition_column,
                predicate_column=:predicate_column, epic_csa_enabled=:epic_csa_enabled,
+               auto_cdc_from_snapshot=:auto_cdc_from_snapshot,
                jdbc_url=:jdbc_url, jdbc_user=:jdbc_user, jdbc_secret_scope=:jdbc_secret_scope,
                jdbc_secret_key=:jdbc_secret_key, connection_name=:connection_name,
                watermark_threshold_minutes=:watermark_threshold_minutes, fetch_size=:fetch_size,
                num_partitions=:num_partitions,
                update_dttm=current_timestamp(), enabled=:enabled
              WHEN NOT MATCHED THEN INSERT (ingestion_group, source_table_name, staging_table_fqn, target_table_fqn,
-               ingestion_type, key_columns, watermark_column, partition_column, predicate_column, epic_csa_enabled,
+               ingestion_type, key_columns, watermark_column, partition_column, predicate_column, epic_csa_enabled, auto_cdc_from_snapshot,
                jdbc_url, jdbc_user, jdbc_secret_scope, jdbc_secret_key, connection_name,
                watermark_threshold_minutes, fetch_size, num_partitions, update_dttm, enabled)
              VALUES (s.ingestion_group, s.source_table_name, :staging_table_fqn, :target_table_fqn,
-               :ingestion_type, :key_columns, :watermark_column, :partition_column, :predicate_column, :epic_csa_enabled,
+               :ingestion_type, :key_columns, :watermark_column, :partition_column, :predicate_column, :epic_csa_enabled, :auto_cdc_from_snapshot,
                :jdbc_url, :jdbc_user, :jdbc_secret_scope, :jdbc_secret_key, :connection_name,
                :watermark_threshold_minutes, :fetch_size, :num_partitions, current_timestamp(), :enabled)`,
             [
@@ -559,6 +575,7 @@ await createApp({
               parameter('partition_column', body.partitionColumn),
               parameter('predicate_column', body.predicateColumn),
               parameter('epic_csa_enabled', String(body.epicCsaEnabled), 'BOOLEAN'),
+              parameter('auto_cdc_from_snapshot', String(body.autoCdcFromSnapshot), 'BOOLEAN'),
               parameter('jdbc_url', body.jdbcUrl),
               parameter('jdbc_user', body.jdbcUser),
               parameter('jdbc_secret_scope', body.jdbcSecretScope),
@@ -671,7 +688,7 @@ await createApp({
       app.post('/api/jobs', async (req, res) => {
         try {
           const body = jobPayloadSchema.parse(req.body);
-          const hasIncrementalSources = await groupHasEnabledIncrementalSource(
+          const hasIncrementalSources = await groupNeedsCdcPipeline(
             body.catalog,
             body.schema,
             body.ingestionGroup

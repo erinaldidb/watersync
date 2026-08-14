@@ -125,13 +125,17 @@ class CdcScd2PipelineBuilder:
             key_columns = [key.strip() for key in (config["key_columns"] or "").split(",") if key.strip()]
             watermark_column = (config["watermark_column"] or "").strip()
             ingestion_type = (config["ingestion_type"] or "incremental").strip().lower()
-            if ingestion_type == "full":
+            auto_cdc_from_snapshot = bool(config.get("auto_cdc_from_snapshot"))
+            if ingestion_type == "full" and not auto_cdc_from_snapshot:
                 continue
             epic_csa_enabled = bool(config["epic_csa_enabled"])
             history_table = (config.get("target_table_fqn") or "").strip()
             if len(history_table.split(".")) != 3:
                 raise ValueError(f"target_table_fqn must use catalog.schema.table for {source_table}")
             flow_prefix = "_".join(history_table.split("."))
+
+            if not key_columns:
+                raise ValueError(f"key_columns is required for CDC on {source_table}")
 
             self.dp.create_streaming_table(
                 name=history_table,
@@ -147,6 +151,8 @@ class CdcScd2PipelineBuilder:
                     self.register_incremental_csa_flow(history_table, flow_prefix, staging_table, staging_fqn, key_columns)
                 else:
                     self.register_incremental_standard_flow(history_table, staging_table, staging_fqn, key_columns, watermark_column)
+            else:
+                self.register_snapshot_flow(history_table, staging_fqn, key_columns)
 
 
 def build_pipeline_from_spark_conf(spark: Any, dp_module: Any) -> None:
