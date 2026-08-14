@@ -1600,7 +1600,11 @@ function ConfigDialog({
           <DialogTitle>{row ? 'Edit' : 'Add'} configuration</DialogTitle>
           <DialogDescription>Values map directly to jdbc_ingestion_config.</DialogDescription>
         </DialogHeader>
-        <form onSubmit={(event) => void submit(event)} className="space-y-4">
+        <form
+          key={`${open}:${row?.ingestion_group ?? 'new'}:${row?.source_table_name ?? 'new'}`}
+          onSubmit={(event) => void submit(event)}
+          className="space-y-4"
+        >
           {error && <ErrorState message={error} />}
           <Tabs defaultValue="mapping" className="w-full">
             <TabsList className="grid w-full grid-cols-3">
