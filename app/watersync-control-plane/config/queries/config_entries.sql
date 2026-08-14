@@ -14,6 +14,7 @@ SELECT
   partition_column,
   predicate_column,
   coalesce(epic_csa_enabled, false) AS epic_csa_enabled,
+  coalesce(auto_cdc_from_snapshot, false) AS auto_cdc_from_snapshot,
   jdbc_url,
   jdbc_user,
   jdbc_secret_scope,

@@ -86,13 +86,14 @@ Pass `--truncate-existing` to reset all state tables (config table is preserved)
 | `ingestion_group` | STRING | yes | Logical group — all rows with the same group run in one job |
 | `source_table_name` | STRING | yes | Fully qualified source table (e.g. `schema.TableName`) |
 | `target_table_name` | STRING | no | Incremental staging-table override; defaults to `staging_<source_table>` |
-| `target_table_fqn` | STRING | yes | Exact final destination in `catalog.schema.table` form. Full loads write here directly; incremental SDP publishes SCD2 here. |
+| `target_table_fqn` | STRING | yes | Exact final destination in `catalog.schema.table` form. Full loads write here directly unless snapshot CDC is enabled; CDC publishes SCD2 here. |
 | `ingestion_type` | STRING | no | `incremental` (default) or `full` |
 | `key_columns` | STRING | no | Comma-separated business keys used by the CDC pipeline |
 | `watermark_column` | STRING | yes* | Timestamp/sequence column for incremental loads (*required unless `epic_csa_enabled`) |
 | `partition_column` | STRING | no | Numeric column for parallel JDBC partitioning |
 | `predicate_column` | STRING | no | String column for predicate-based parallel reads |
 | `epic_csa_enabled` | BOOLEAN | no | Set `true` to use the EPIC CSA worker |
+| `auto_cdc_from_snapshot` | BOOLEAN | no | For `full` sources, write versioned snapshots to staging and maintain SCD Type 2 history in the target |
 | `enabled` | BOOLEAN | yes | Set `false` to skip the row without deleting it |
 
 JDBC execution settings are row-level configuration: `jdbc_url`, `jdbc_user`,

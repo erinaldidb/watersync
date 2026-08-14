@@ -20,7 +20,11 @@ class JdbcIngestionWorker(ABC):
         self.runtime = runtime
         self.config = config
         self.staging_table_fqn = config.staging_table_fqn
-        self.write_table_fqn = config.target_table_fqn if config.ingestion_type == "full" else self.staging_table_fqn
+        self.write_table_fqn = (
+            config.target_table_fqn
+            if config.ingestion_type == "full" and not config.auto_cdc_from_snapshot
+            else self.staging_table_fqn
+        )
 
     def process(self) -> dict[str, Any]:
         _ctx = {

@@ -79,6 +79,7 @@ type ConfigRow = {
   partition_column: string | null;
   predicate_column: string | null;
   epic_csa_enabled: boolean;
+  auto_cdc_from_snapshot: boolean;
   jdbc_url: string | null;
   jdbc_user: string | null;
   jdbc_secret_scope: string | null;
@@ -722,6 +723,7 @@ function DiscoveryDialog({
   const [selectedTables, setSelectedTables] = useState<SourceTable[]>([]);
   const [ingestionType, setIngestionType] = useState('incremental');
   const [epicCsa, setEpicCsa] = useState(false);
+  const [autoCdcFromSnapshot, setAutoCdcFromSnapshot] = useState(false);
   const [drafts, setDrafts] = useState<TableDraft[]>([]);
   const [reviewPage, setReviewPage] = useState(0);
   const [confirmedPages, setConfirmedPages] = useState<number[]>([]);
@@ -830,7 +832,7 @@ function DiscoveryDialog({
             columns: resultTable.columns,
             ...inferColumns(resultTable.columns),
             targetFqn: `${baseTargetFqn.replace(/\.$/, '')}.${target}`,
-            stagingFqn: ingestionType === 'incremental' ? `${baseStagingFqn.replace(/\.$/, '')}.staging_${target}` : '',
+            stagingFqn: ingestionType === 'incremental' || autoCdcFromSnapshot ? `${baseStagingFqn.replace(/\.$/, '')}.staging_${target}` : '',
           };
         });
         setDrafts((current) => [...current, ...pageDrafts]);
@@ -867,6 +869,7 @@ function DiscoveryDialog({
             partitionColumn: draft.partitionColumn === 'none' ? null : draft.partitionColumn,
             predicateColumn: draft.predicateColumn === 'none' ? null : draft.predicateColumn,
             epicCsaEnabled: epicCsa,
+            autoCdcFromSnapshot,
             jdbcUrl: connectionMode === 'jdbc' ? jdbcUrl : null,
             jdbcUser: connectionMode === 'jdbc' ? jdbcUser : null,
             jdbcSecretScope: connectionMode === 'jdbc' ? secretScope : null,
@@ -916,28 +919,34 @@ function DiscoveryDialog({
     setDrafts((current) =>
       current.map((draft) => ({
         ...draft,
-        stagingFqn: ingestionType === 'incremental' ? `${base}.staging_${safeTargetName(draft.table.table_name)}` : '',
+        stagingFqn:
+          ingestionType === 'incremental' || autoCdcFromSnapshot
+            ? `${base}.staging_${safeTargetName(draft.table.table_name)}`
+            : '',
       }))
     );
   };
   const draftValid = (draft: TableDraft) =>
     Boolean(
       draft.targetFqn &&
-        (ingestionType === 'full' || (draft.keyColumn !== 'none' && (epicCsa || draft.watermarkColumn !== 'none')))
+        (ingestionType === 'full'
+          ? !autoCdcFromSnapshot || (draft.stagingFqn && draft.keyColumn !== 'none')
+          : draft.keyColumn !== 'none' && (epicCsa || draft.watermarkColumn !== 'none'))
     );
   const reviewPageCount = Math.ceil(drafts.length / 10);
   const reviewPageStart = reviewPage * 10;
   const visibleDrafts = drafts.slice(reviewPageStart, reviewPageStart + 10);
   const reviewPageConfirmed = confirmedPages.includes(reviewPage);
   const reviewPageValid =
-    Boolean(baseTargetFqn && (ingestionType === 'full' || baseStagingFqn)) && visibleDrafts.every(draftValid);
+    Boolean(baseTargetFqn && (ingestionType === 'full' && !autoCdcFromSnapshot ? true : baseStagingFqn)) &&
+    visibleDrafts.every(draftValid);
   const allPagesConfirmed =
     reviewPageCount > 0 &&
     Array.from({ length: reviewPageCount }, (_, page) => page).every((page) => confirmedPages.includes(page));
   const draftsValid =
     !inferenceProgress &&
     allPagesConfirmed &&
-    Boolean(baseTargetFqn && (ingestionType === 'full' || baseStagingFqn)) &&
+    Boolean(baseTargetFqn && (ingestionType === 'full' && !autoCdcFromSnapshot ? true : baseStagingFqn)) &&
     drafts.every(draftValid);
   const confirmCurrentPage = () =>
     setConfirmedPages((current) => (current.includes(reviewPage) ? current : [...current, reviewPage]));
@@ -1233,6 +1242,7 @@ function DiscoveryDialog({
                     onValueChange={(value) => {
                       setIngestionType(value);
                       if (value === 'full') setEpicCsa(false);
+                      else setAutoCdcFromSnapshot(false);
                     }}
                   >
                     <SelectTrigger id="discover-type">
@@ -1255,6 +1265,18 @@ function DiscoveryDialog({
                     <small>Uses change-sequence tracking instead of a timestamp watermark.</small>
                   </span>
                 </label>
+                {ingestionType === 'full' && (
+                  <label className="mode-toggle md:col-span-2">
+                    <Checkbox
+                      checked={autoCdcFromSnapshot}
+                      onCheckedChange={(checked) => setAutoCdcFromSnapshot(checked === true)}
+                    />
+                    <span>
+                      <strong>Auto CDC from snapshots</strong>
+                      <small>Compare each full snapshot with the previous version and maintain SCD Type 2 history.</small>
+                    </span>
+                  </label>
+                )}
               </CardContent>
             </Card>
           </div>
@@ -1522,6 +1544,8 @@ function ConfigDialog({
 }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [ingestionType, setIngestionType] = useState(row?.ingestion_type ?? 'incremental');
+  useEffect(() => setIngestionType(row?.ingestion_type ?? 'incremental'), [row, open]);
   const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setBusy(true);
@@ -1544,6 +1568,7 @@ function ConfigDialog({
           partitionColumn: f.get('partition') || null,
           predicateColumn: f.get('predicate') || null,
           epicCsaEnabled: f.get('epic') === 'on',
+          autoCdcFromSnapshot: f.get('auto_cdc_from_snapshot') === 'on',
           jdbcUrl: f.get('jdbc_url') || null,
           jdbcUser: f.get('jdbc_user') || null,
           jdbcSecretScope: f.get('jdbc_secret_scope') || null,
@@ -1585,7 +1610,7 @@ function ConfigDialog({
                 <Field name="staging_fqn" label="Staging table FQN" value={row?.staging_table_fqn} />
                 <div>
                   <Label htmlFor="type">Ingestion type</Label>
-                  <Select name="type" defaultValue={row?.ingestion_type ?? 'incremental'}>
+                  <Select name="type" value={ingestionType} onValueChange={setIngestionType}>
                     <SelectTrigger id="type" className="w-full">
                       <SelectValue />
                     </SelectTrigger>
@@ -1596,6 +1621,13 @@ function ConfigDialog({
                   </Select>
                 </div>
                 <Toggle name="enabled" label="Enabled" checked={row?.enabled ?? true} />
+                {ingestionType === 'full' && (
+                  <Toggle
+                    name="auto_cdc_from_snapshot"
+                    label="Auto CDC from snapshots"
+                    checked={row?.auto_cdc_from_snapshot ?? false}
+                  />
+                )}
               </div>
             </TabsContent>
             <TabsContent value="incremental" forceMount className="mt-4 data-[state=inactive]:hidden">
