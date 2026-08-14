@@ -689,6 +689,7 @@ const temporalTypes = [
   'timestamp without time zone',
   'timestamp with time zone',
 ];
+const timestampTypes = ['datetime', 'datetime2', 'timestamp'];
 const stringTypes = ['char', 'varchar', 'nvarchar', 'text', 'string'];
 const isType = (column: SourceColumn, types: string[]) =>
   types.some((type) => column.data_type.toLowerCase().includes(type));
@@ -782,8 +783,13 @@ function DiscoveryDialog({
     const key = primary[0] ?? idFallback?.column_name ?? next[0]?.column_name ?? 'none';
     const watermark =
       next.find(
+        (column) => isType(column, timestampTypes) && /(update|modified|change|timestamp|date)/i.test(column.column_name)
+      ) ??
+      next.find((column) => isType(column, timestampTypes)) ??
+      next.find(
         (column) => isType(column, temporalTypes) && /(update|modified|change|timestamp|date)/i.test(column.column_name)
-      ) ?? next.find((column) => isType(column, temporalTypes));
+      ) ??
+      next.find((column) => isType(column, temporalTypes));
     const partition =
       next.find((column) => column.column_name === key && isType(column, numericTypes)) ??
       next.find((column) => isType(column, numericTypes) && column.is_nullable === 'NO');
@@ -1346,7 +1352,7 @@ function DiscoveryDialog({
                           id={`watermark-column-${index}`}
                           label="Watermark column"
                           value={draft.watermarkColumn}
-                          columns={draft.columns.filter((column) => isType(column, temporalTypes))}
+                          columns={draft.columns}
                           onChange={(value) => updateDraft(index, { watermarkColumn: value })}
                           disabled={ingestionType === 'full' || epicCsa}
                         />
