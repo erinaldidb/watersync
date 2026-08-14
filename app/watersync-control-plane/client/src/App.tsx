@@ -1573,7 +1573,7 @@ function ConfigDialog({
           watermarkColumn: f.get('watermark') || null,
           partitionColumn: f.get('partition') || null,
           predicateColumn: f.get('predicate') || null,
-          epicCsaEnabled: f.get('epic') === 'on',
+          epicCsaEnabled: ingestionType === 'incremental' && f.get('epic') === 'on',
           autoCdcFromSnapshot: f.get('auto_cdc_from_snapshot') === 'on',
           jdbcUrl: f.get('jdbc_url') || null,
           jdbcUser: f.get('jdbc_user') || null,
@@ -1651,7 +1651,12 @@ function ConfigDialog({
                   label="Watermark delay (minutes)"
                   value={String(row?.watermark_threshold_minutes ?? 5)}
                 />
-                <Toggle name="epic" label="EPIC CSA mode" checked={row?.epic_csa_enabled ?? false} />
+                <Toggle
+                  name="epic"
+                  label="EPIC CSA mode"
+                  checked={ingestionType === 'incremental' && (row?.epic_csa_enabled ?? false)}
+                  disabled={ingestionType === 'full'}
+                />
               </div>
             </TabsContent>
             <TabsContent value="connection" forceMount className="mt-4 data-[state=inactive]:hidden">
@@ -1701,10 +1706,20 @@ function Field({
     </div>
   );
 }
-function Toggle({ name, label, checked }: { name: string; label: string; checked: boolean }) {
+function Toggle({
+  name,
+  label,
+  checked,
+  disabled = false,
+}: {
+  name: string;
+  label: string;
+  checked: boolean;
+  disabled?: boolean;
+}) {
   return (
-    <label className="flex items-center gap-3 rounded-md border p-3 text-sm">
-      <Switch name={name} defaultChecked={checked} />
+    <label className={`flex items-center gap-3 rounded-md border p-3 text-sm ${disabled ? 'opacity-50' : ''}`}>
+      <Switch name={name} defaultChecked={checked} disabled={disabled} />
       {label}
     </label>
   );

@@ -31,6 +31,9 @@ const configSchema = locationSchema
     enabled: z.boolean(),
   })
   .superRefine((value, context) => {
+    if (value.epicCsaEnabled && value.ingestionType !== 'incremental') {
+      context.addIssue({ code: 'custom', path: ['epicCsaEnabled'], message: 'EPIC CSA requires incremental ingestion' });
+    }
     if (value.autoCdcFromSnapshot && value.ingestionType !== 'full') {
       context.addIssue({ code: 'custom', path: ['autoCdcFromSnapshot'], message: 'Snapshot CDC requires full ingestion' });
     }
