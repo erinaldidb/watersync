@@ -309,6 +309,11 @@ const listTablesSql = (databaseType: z.infer<typeof sourceDatabaseType>, tableFi
   return databaseType === 'sqlserver' ? base : `${base} LIMIT ${sourceTableLimit}`;
 };
 
+// remote_query wraps the statement as a derived table, and SQL Server rejects ORDER BY there
+// unless TOP, OFFSET or FOR XML is present.
+const orderBySuffix = (databaseType: z.infer<typeof sourceDatabaseType>) =>
+  databaseType === 'sqlserver' ? ' OFFSET 0 ROWS' : '';
+
 const columnsSql = (databaseType: z.infer<typeof sourceDatabaseType>, sourceSchema: string, table: string) => {
   const schema = sqlLiteral(sourceSchema);
   const tableNameValue = sqlLiteral(table);
@@ -348,7 +353,7 @@ const columnsSql = (databaseType: z.infer<typeof sourceDatabaseType>, sourceSche
         AND tc.TABLE_SCHEMA = ${schema} AND tc.TABLE_NAME = ${tableNameValue}
     ) pk ON 1 = 1
     WHERE c.TABLE_SCHEMA = ${schema} AND c.TABLE_NAME = ${tableNameValue}
-    ORDER BY c.ORDINAL_POSITION`;
+    ORDER BY c.ORDINAL_POSITION${orderBySuffix(databaseType)}`;
 };
 
 const columnsBatchSql = (
@@ -398,7 +403,7 @@ const columnsBatchSql = (
       WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
     ) pk ON pk.TABLE_SCHEMA = c.TABLE_SCHEMA AND pk.TABLE_NAME = c.TABLE_NAME AND pk.COLUMN_NAME = c.COLUMN_NAME
     WHERE ${filter}
-    ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION`;
+    ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION${orderBySuffix(databaseType)}`;
 };
 
 async function groupNeedsCdcPipeline(catalog: string, schema: string, ingestionGroup: string) {
