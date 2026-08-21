@@ -32,10 +32,18 @@ const configSchema = locationSchema
   })
   .superRefine((value, context) => {
     if (value.epicCsaEnabled && value.ingestionType !== 'incremental') {
-      context.addIssue({ code: 'custom', path: ['epicCsaEnabled'], message: 'EPIC CSA requires incremental ingestion' });
+      context.addIssue({
+        code: 'custom',
+        path: ['epicCsaEnabled'],
+        message: 'EPIC CSA requires incremental ingestion',
+      });
     }
     if (value.autoCdcFromSnapshot && value.ingestionType !== 'full') {
-      context.addIssue({ code: 'custom', path: ['autoCdcFromSnapshot'], message: 'Snapshot CDC requires full ingestion' });
+      context.addIssue({
+        code: 'custom',
+        path: ['autoCdcFromSnapshot'],
+        message: 'Snapshot CDC requires full ingestion',
+      });
     }
     if (value.autoCdcFromSnapshot && !value.stagingTableFqn?.trim()) {
       context.addIssue({ code: 'custom', path: ['stagingTableFqn'], message: 'Snapshot CDC requires a staging table' });
@@ -69,6 +77,7 @@ const sourceDiscoverySchema = z
     jdbcSecretKey: z.string().trim().optional().default(''),
     database: z.string().trim().optional().default(''),
     databaseType: sourceDatabaseType,
+    tableFilter: z.string().trim().max(200).optional().default(''),
   })
   .superRefine((value, context) => {
     if (value.connectionName) return;
@@ -263,18 +272,41 @@ async function withDiscoveryConnection<T>(body: SourceDiscovery, action: (connec
   }
 }
 
-const listTablesSql = (databaseType: z.infer<typeof sourceDatabaseType>) => {
+const sourceTableLimit = 1000;
+
+const likeLiteral = (value: string) => sqlLiteral(`%${value.toLowerCase()}%`);
+
+const tableFilterPredicate = (tableFilter: string, schemaColumn: string, tableColumn: string) => {
+  if (!tableFilter) return '';
+  const separator = tableFilter.lastIndexOf('.');
+  if (separator === -1) {
+    return `(LOWER(${schemaColumn}) LIKE ${likeLiteral(tableFilter)}
+      OR LOWER(${tableColumn}) LIKE ${likeLiteral(tableFilter)})`;
+  }
+  const conditions = [
+    [schemaColumn, tableFilter.slice(0, separator).trim()],
+    [tableColumn, tableFilter.slice(separator + 1).trim()],
+  ]
+    .filter(([, value]) => value)
+    .map(([column, value]) => `LOWER(${column}) LIKE ${likeLiteral(value)}`);
+  return conditions.length ? `(${conditions.join(' AND ')})` : '';
+};
+
+const listTablesSql = (databaseType: z.infer<typeof sourceDatabaseType>, tableFilter: string) => {
   if (databaseType === 'oracle') {
+    const predicate = tableFilterPredicate(tableFilter, 'OWNER', 'TABLE_NAME');
     return `SELECT OWNER AS table_schema, TABLE_NAME AS table_name
       FROM ALL_TABLES
+      ${predicate ? `WHERE ${predicate}` : ''}
       ORDER BY OWNER, TABLE_NAME
-      FETCH FIRST 1000 ROWS ONLY`;
+      FETCH FIRST ${sourceTableLimit} ROWS ONLY`;
   }
-  const base = `SELECT ${databaseType === 'sqlserver' ? 'TOP 1000 ' : ''}TABLE_SCHEMA AS table_schema, TABLE_NAME AS table_name
+  const predicate = tableFilterPredicate(tableFilter, 'TABLE_SCHEMA', 'TABLE_NAME');
+  const base = `SELECT ${databaseType === 'sqlserver' ? `TOP ${sourceTableLimit} ` : ''}TABLE_SCHEMA AS table_schema, TABLE_NAME AS table_name
     FROM INFORMATION_SCHEMA.TABLES
-    WHERE TABLE_TYPE IN ('BASE TABLE', 'TABLE')
+    WHERE TABLE_TYPE IN ('BASE TABLE', 'TABLE')${predicate ? ` AND ${predicate}` : ''}
     ORDER BY TABLE_SCHEMA, TABLE_NAME`;
-  return databaseType === 'sqlserver' ? base : `${base} LIMIT 1000`;
+  return databaseType === 'sqlserver' ? base : `${base} LIMIT ${sourceTableLimit}`;
 };
 
 const columnsSql = (databaseType: z.infer<typeof sourceDatabaseType>, sourceSchema: string, table: string) => {
@@ -472,11 +504,12 @@ await createApp({
             remoteQuery(
               connectionName,
               body.connectionName ? undefined : body.database,
-              listTablesSql(body.databaseType),
+              listTablesSql(body.databaseType, body.tableFilter),
               body.databaseType
             )
           );
-          res.json({ tables: responseRows(response) });
+          const tables = responseRows(response);
+          res.json({ tables, truncated: tables.length >= sourceTableLimit });
         } catch (error) {
           handleError(res, error);
         }
@@ -689,11 +722,7 @@ await createApp({
       app.post('/api/jobs', async (req, res) => {
         try {
           const body = jobPayloadSchema.parse(req.body);
-          const hasIncrementalSources = await groupNeedsCdcPipeline(
-            body.catalog,
-            body.schema,
-            body.ingestionGroup
-          );
+          const hasIncrementalSources = await groupNeedsCdcPipeline(body.catalog, body.schema, body.ingestionGroup);
           const cdcPipelineId = hasIncrementalSources
             ? await ensureCdcPipeline({
                 pipelineId: body.cdcPipelineId,

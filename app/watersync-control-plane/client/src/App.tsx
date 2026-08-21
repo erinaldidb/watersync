@@ -694,6 +694,19 @@ const stringTypes = ['char', 'varchar', 'nvarchar', 'text', 'string'];
 const isType = (column: SourceColumn, types: string[]) =>
   types.some((type) => column.data_type.toLowerCase().includes(type));
 const safeTargetName = (value: string) => value.replace(/[^A-Za-z0-9_]/g, '_').toLowerCase();
+const sourceTableLimit = 1000;
+// Mirrors the server predicate: "schema.table" narrows both sides, anything else matches either.
+const matchesTableFilter = (table: SourceTable, filter: string) => {
+  const value = filter.trim().toLowerCase();
+  if (!value) return true;
+  const schema = table.table_schema.toLowerCase();
+  const name = table.table_name.toLowerCase();
+  const separator = value.lastIndexOf('.');
+  if (separator === -1) return schema.includes(value) || name.includes(value);
+  const schemaPart = value.slice(0, separator).trim();
+  const tablePart = value.slice(separator + 1).trim();
+  return (!schemaPart || schema.includes(schemaPart)) && (!tablePart || name.includes(tablePart));
+};
 
 function DiscoveryDialog({
   open,
@@ -720,7 +733,10 @@ function DiscoveryDialog({
   const [secretScope, setSecretScope] = useState('');
   const [secretKey, setSecretKey] = useState('');
   const [tables, setTables] = useState<SourceTable[]>([]);
+  const [tablesTruncated, setTablesTruncated] = useState(false);
   const [tableFilter, setTableFilter] = useState('');
+  const [appliedTableFilter, setAppliedTableFilter] = useState<string | null>(null);
+  const [searchingTables, setSearchingTables] = useState(false);
   const [selectedTables, setSelectedTables] = useState<SourceTable[]>([]);
   const [ingestionType, setIngestionType] = useState('incremental');
   const [epicCsa, setEpicCsa] = useState(false);
@@ -738,11 +754,14 @@ function DiscoveryDialog({
     setStep(1);
     setError(null);
     setTables([]);
+    setTablesTruncated(false);
     setSelectedTables([]);
     setDrafts([]);
     setReviewPage(0);
     setConfirmedPages([]);
     setTableFilter('');
+    setAppliedTableFilter(null);
+    setSearchingTables(false);
     setBaseTargetFqn(`${location.catalog}.${location.schema}`);
     setBaseStagingFqn(`${location.catalog}.${location.schema}`);
     setInferenceProgress(null);
@@ -752,38 +771,57 @@ function DiscoveryDialog({
     if (!value) reset();
     onOpenChange(value);
   };
+  const fetchSourceTables = async (filter: string) => {
+    const result = await api<{ tables: SourceTable[]; truncated?: boolean }>('/api/source-tables', {
+      method: 'POST',
+      body: JSON.stringify({
+        connectionName: connectionMode === 'uc' ? connectionName : '',
+        jdbcUrl: connectionMode === 'jdbc' ? jdbcUrl : '',
+        jdbcUser: connectionMode === 'jdbc' ? jdbcUser : '',
+        jdbcSecretScope: connectionMode === 'jdbc' ? secretScope : '',
+        jdbcSecretKey: connectionMode === 'jdbc' ? secretKey : '',
+        database,
+        databaseType,
+        tableFilter: filter,
+      }),
+    });
+    setTables(result.tables);
+    setTablesTruncated(Boolean(result.truncated));
+    setAppliedTableFilter(filter);
+  };
   const loadTables = async () => {
     setBusy(true);
     setInferenceProgress(null);
     setError(null);
     setSelectedTables([]);
     try {
-      const result = await api<{ tables: SourceTable[] }>('/api/source-tables', {
-        method: 'POST',
-        body: JSON.stringify({
-          connectionName: connectionMode === 'uc' ? connectionName : '',
-          jdbcUrl: connectionMode === 'jdbc' ? jdbcUrl : '',
-          jdbcUser: connectionMode === 'jdbc' ? jdbcUser : '',
-          jdbcSecretScope: connectionMode === 'jdbc' ? secretScope : '',
-          jdbcSecretKey: connectionMode === 'jdbc' ? secretKey : '',
-          database,
-          databaseType,
-        }),
-      });
-      setTables(result.tables);
+      await fetchSourceTables(tableFilter);
     } catch (value) {
       setError(errorMessage(value));
     } finally {
       setBusy(false);
     }
   };
+  useEffect(() => {
+    if (busy || appliedTableFilter === null || tableFilter.trim() === appliedTableFilter.trim()) return;
+    const timer = setTimeout(() => {
+      setSearchingTables(true);
+      setError(null);
+      fetchSourceTables(tableFilter)
+        .catch((value) => setError(errorMessage(value)))
+        .finally(() => setSearchingTables(false));
+    }, 500);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tableFilter, appliedTableFilter, busy]);
   const inferColumns = (next: SourceColumn[]) => {
     const primary = next.filter((column) => column.is_primary_key === '1').map((column) => column.column_name);
     const idFallback = next.find((column) => /(^id$|_id$)/i.test(column.column_name) && column.is_nullable === 'NO');
     const key = primary[0] ?? idFallback?.column_name ?? next[0]?.column_name ?? 'none';
     const watermark =
       next.find(
-        (column) => isType(column, timestampTypes) && /(update|modified|change|timestamp|date)/i.test(column.column_name)
+        (column) =>
+          isType(column, timestampTypes) && /(update|modified|change|timestamp|date)/i.test(column.column_name)
       ) ??
       next.find((column) => isType(column, timestampTypes)) ??
       next.find(
@@ -838,7 +876,10 @@ function DiscoveryDialog({
             columns: resultTable.columns,
             ...inferColumns(resultTable.columns),
             targetFqn: `${baseTargetFqn.replace(/\.$/, '')}.${target}`,
-            stagingFqn: ingestionType === 'incremental' || autoCdcFromSnapshot ? `${baseStagingFqn.replace(/\.$/, '')}.staging_${target}` : '',
+            stagingFqn:
+              ingestionType === 'incremental' || autoCdcFromSnapshot
+                ? `${baseStagingFqn.replace(/\.$/, '')}.staging_${target}`
+                : '',
           };
         });
         setDrafts((current) => [...current, ...pageDrafts]);
@@ -896,9 +937,12 @@ function DiscoveryDialog({
       setBusy(false);
     }
   };
-  const filteredTables = tables.filter((table) =>
-    `${table.table_schema}.${table.table_name}`.toLowerCase().includes(tableFilter.toLowerCase())
-  );
+  // Once the source search has returned for the current term the list is already narrowed; the local
+  // pass only keeps the list responsive while a newly typed term is still debouncing.
+  const filteredTables =
+    appliedTableFilter !== null && appliedTableFilter.trim() === tableFilter.trim()
+      ? tables
+      : tables.filter((table) => matchesTableFilter(table, tableFilter));
   const canContinue = Boolean(group && selectedTables.length);
   const canLoadTables =
     connectionMode === 'uc'
@@ -1147,12 +1191,15 @@ function DiscoveryDialog({
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">Available tables</CardTitle>
-                <CardDescription>Select every table you want to replicate.</CardDescription>
+                <CardDescription>
+                  Select every table you want to replicate. The search runs against the source database, so tables
+                  outside the first {sourceTableLimit.toLocaleString()} results are still reachable.
+                </CardDescription>
               </CardHeader>
               <CardContent>
                 {busy && !tables.length ? (
                   <Skeleton className="h-56" />
-                ) : !tables.length ? (
+                ) : appliedTableFilter === null ? (
                   <Empty>
                     <EmptyHeader>
                       <EmptyTitle>No tables loaded</EmptyTitle>
@@ -1166,7 +1213,7 @@ function DiscoveryDialog({
                     <div className="mb-4 flex flex-wrap items-center gap-3">
                       <Input
                         aria-label="Filter available tables"
-                        placeholder="Filter schema or table"
+                        placeholder="Search schema or table, for example dbo.customer"
                         value={tableFilter}
                         onChange={(event) => setTableFilter(event.target.value)}
                         className="min-w-64 flex-1"
@@ -1196,42 +1243,63 @@ function DiscoveryDialog({
                         </Button>
                       </div>
                     </div>
-                    <div className="source-table-list">
-                      {filteredTables.map((table) => {
-                        const selected = selectedTables.some(
-                          (selectedTable) =>
-                            selectedTable.table_schema === table.table_schema &&
-                            selectedTable.table_name === table.table_name
-                        );
-                        return (
-                          <button
-                            type="button"
-                            key={`${table.table_schema}.${table.table_name}`}
-                            className={`source-table-option ${selected ? 'source-table-option-selected' : ''}`}
-                            onClick={() =>
-                              setSelectedTables((current) =>
-                                selected
-                                  ? current.filter(
-                                      (selectedTable) =>
-                                        selectedTable.table_schema !== table.table_schema ||
-                                        selectedTable.table_name !== table.table_name
-                                    )
-                                  : [...current, table]
-                              )
-                            }
-                          >
-                            <Checkbox
-                              checked={selected}
-                              aria-label={`Select ${table.table_schema}.${table.table_name}`}
-                            />
-                            <span className="min-w-0 truncate">
-                              {table.table_schema}.<strong>{table.table_name}</strong>
-                            </span>
-                            {selected && <CheckCircle2 className="ml-auto h-4 w-4" />}
-                          </button>
-                        );
-                      })}
-                    </div>
+                    {searchingTables ? (
+                      <Skeleton className="h-56" />
+                    ) : !filteredTables.length ? (
+                      <Empty>
+                        <EmptyHeader>
+                          <EmptyTitle>No matching tables</EmptyTitle>
+                          <EmptyDescription>
+                            {tableFilter.trim()
+                              ? `No source table matches “${tableFilter.trim()}”. Try a shorter search term.`
+                              : 'The source connection returned no tables.'}
+                          </EmptyDescription>
+                        </EmptyHeader>
+                      </Empty>
+                    ) : (
+                      <div className="source-table-list">
+                        {filteredTables.map((table) => {
+                          const selected = selectedTables.some(
+                            (selectedTable) =>
+                              selectedTable.table_schema === table.table_schema &&
+                              selectedTable.table_name === table.table_name
+                          );
+                          return (
+                            <button
+                              type="button"
+                              key={`${table.table_schema}.${table.table_name}`}
+                              className={`source-table-option ${selected ? 'source-table-option-selected' : ''}`}
+                              onClick={() =>
+                                setSelectedTables((current) =>
+                                  selected
+                                    ? current.filter(
+                                        (selectedTable) =>
+                                          selectedTable.table_schema !== table.table_schema ||
+                                          selectedTable.table_name !== table.table_name
+                                      )
+                                    : [...current, table]
+                                )
+                              }
+                            >
+                              <Checkbox
+                                checked={selected}
+                                aria-label={`Select ${table.table_schema}.${table.table_name}`}
+                              />
+                              <span className="min-w-0 truncate">
+                                {table.table_schema}.<strong>{table.table_name}</strong>
+                              </span>
+                              {selected && <CheckCircle2 className="ml-auto h-4 w-4" />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {tablesTruncated && (
+                      <p className="mt-3 text-xs text-muted-foreground">
+                        Showing the first {sourceTableLimit.toLocaleString()} matches. Refine the search to reach tables
+                        beyond this limit.
+                      </p>
+                    )}
                   </>
                 )}
               </CardContent>
@@ -1279,7 +1347,9 @@ function DiscoveryDialog({
                     />
                     <span>
                       <strong>Auto CDC from snapshots</strong>
-                      <small>Compare each full snapshot with the previous version and maintain SCD Type 2 history.</small>
+                      <small>
+                        Compare each full snapshot with the previous version and maintain SCD Type 2 history.
+                      </small>
                     </span>
                   </label>
                 )}
