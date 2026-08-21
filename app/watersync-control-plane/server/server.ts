@@ -249,7 +249,8 @@ async function withDiscoveryConnection<T>(body: SourceDiscovery, action: (connec
     host ${sqlLiteral(endpoint.host)},
     port ${sqlLiteral(endpoint.port)},
     user ${sqlLiteral(body.jdbcUser)},
-    password secret(${sqlLiteral(body.jdbcSecretScope)}, ${sqlLiteral(body.jdbcSecretKey)})
+    password secret(${sqlLiteral(body.jdbcSecretScope)}, ${sqlLiteral(body.jdbcSecretKey)}),
+    trustServerCertificate true
   )`);
   try {
     return await action(connectionName);
