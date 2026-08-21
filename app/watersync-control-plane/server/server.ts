@@ -2,6 +2,17 @@ import { analytics, createApp, server } from '@databricks/appkit';
 import { WorkspaceClient, jobs, pipelines, sql as dbsql } from '@databricks/sdk-experimental';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import {
+  apiRoute,
+  clientLogBatchSchema,
+  installProcessLogging,
+  logClientEvents,
+  logger,
+  requestLogging,
+  serializeError,
+} from './logging.js';
+
+installProcessLogging();
 
 const identifierPart = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
 const locationSchema = z.object({ catalog: identifierPart, schema: identifierPart });
@@ -32,10 +43,18 @@ const configSchema = locationSchema
   })
   .superRefine((value, context) => {
     if (value.epicCsaEnabled && value.ingestionType !== 'incremental') {
-      context.addIssue({ code: 'custom', path: ['epicCsaEnabled'], message: 'EPIC CSA requires incremental ingestion' });
+      context.addIssue({
+        code: 'custom',
+        path: ['epicCsaEnabled'],
+        message: 'EPIC CSA requires incremental ingestion',
+      });
     }
     if (value.autoCdcFromSnapshot && value.ingestionType !== 'full') {
-      context.addIssue({ code: 'custom', path: ['autoCdcFromSnapshot'], message: 'Snapshot CDC requires full ingestion' });
+      context.addIssue({
+        code: 'custom',
+        path: ['autoCdcFromSnapshot'],
+        message: 'Snapshot CDC requires full ingestion',
+      });
     }
     if (value.autoCdcFromSnapshot && !value.stagingTableFqn?.trim()) {
       context.addIssue({ code: 'custom', path: ['stagingTableFqn'], message: 'Snapshot CDC requires a staging table' });
@@ -69,6 +88,7 @@ const sourceDiscoverySchema = z
     jdbcSecretKey: z.string().trim().optional().default(''),
     database: z.string().trim().optional().default(''),
     databaseType: sourceDatabaseType,
+    tableFilter: z.string().trim().max(200).optional().default(''),
   })
   .superRefine((value, context) => {
     if (value.connectionName) return;
@@ -174,19 +194,47 @@ const parameter = (
   ...(value == null ? {} : { value }),
 });
 
+const statementSummary = (statement: string) => statement.replace(/\s+/g, ' ').trim().slice(0, 500);
+
 async function execute(statement: string, parameters: dbsql.StatementParameterListItem[] = []) {
-  const response = await workspace.statementExecution.executeStatement({
-    warehouse_id: warehouseId,
-    statement,
-    parameters,
-    wait_timeout: '50s',
-    on_wait_timeout: 'CANCEL',
-  });
+  const startedAt = Date.now();
+  let response: dbsql.StatementResponse;
+  try {
+    response = await workspace.statementExecution.executeStatement({
+      warehouse_id: warehouseId,
+      statement,
+      parameters,
+      wait_timeout: '50s',
+      on_wait_timeout: 'CANCEL',
+    });
+  } catch (error) {
+    logger.error('sql.execute_rejected', {
+      statement: statementSummary(statement),
+      parameterNames: parameters.map((item) => item.name),
+      durationMs: Date.now() - startedAt,
+      error: serializeError(error),
+    });
+    throw error;
+  }
   if (response.status?.state !== 'SUCCEEDED') {
+    logger.error('sql.statement_failed', {
+      statement: statementSummary(statement),
+      parameterNames: parameters.map((item) => item.name),
+      statementId: response.statement_id,
+      state: response.status?.state,
+      errorCode: response.status?.error?.error_code,
+      message: response.status?.error?.message,
+      durationMs: Date.now() - startedAt,
+    });
     throw new Error(
       response.status?.error?.message ?? `SQL statement ended in ${response.status?.state ?? 'unknown state'}`
     );
   }
+  logger.debug('sql.statement_succeeded', {
+    statement: statementSummary(statement),
+    statementId: response.statement_id,
+    durationMs: Date.now() - startedAt,
+  });
   return response;
 }
 
@@ -258,24 +306,52 @@ async function withDiscoveryConnection<T>(body: SourceDiscovery, action: (connec
     try {
       await execute(`DROP CONNECTION IF EXISTS \`${connectionName}\``);
     } catch (error) {
-      console.error(`Failed to remove temporary discovery connection ${connectionName}`, error);
+      logger.warn('discovery.connection_cleanup_failed', { connectionName, error: serializeError(error) });
     }
   }
 }
 
-const listTablesSql = (databaseType: z.infer<typeof sourceDatabaseType>) => {
+const sourceTableLimit = 1000;
+
+const likeLiteral = (value: string) => sqlLiteral(`%${value.toLowerCase()}%`);
+
+const tableFilterPredicate = (tableFilter: string, schemaColumn: string, tableColumn: string) => {
+  if (!tableFilter) return '';
+  const separator = tableFilter.lastIndexOf('.');
+  if (separator === -1) {
+    return `(LOWER(${schemaColumn}) LIKE ${likeLiteral(tableFilter)}
+      OR LOWER(${tableColumn}) LIKE ${likeLiteral(tableFilter)})`;
+  }
+  const conditions = [
+    [schemaColumn, tableFilter.slice(0, separator).trim()],
+    [tableColumn, tableFilter.slice(separator + 1).trim()],
+  ]
+    .filter(([, value]) => value)
+    .map(([column, value]) => `LOWER(${column}) LIKE ${likeLiteral(value)}`);
+  return conditions.length ? `(${conditions.join(' AND ')})` : '';
+};
+
+const listTablesSql = (databaseType: z.infer<typeof sourceDatabaseType>, tableFilter: string) => {
   if (databaseType === 'oracle') {
+    const predicate = tableFilterPredicate(tableFilter, 'OWNER', 'TABLE_NAME');
     return `SELECT OWNER AS table_schema, TABLE_NAME AS table_name
       FROM ALL_TABLES
+      ${predicate ? `WHERE ${predicate}` : ''}
       ORDER BY OWNER, TABLE_NAME
-      FETCH FIRST 1000 ROWS ONLY`;
+      FETCH FIRST ${sourceTableLimit} ROWS ONLY`;
   }
-  const base = `SELECT ${databaseType === 'sqlserver' ? 'TOP 1000 ' : ''}TABLE_SCHEMA AS table_schema, TABLE_NAME AS table_name
+  const predicate = tableFilterPredicate(tableFilter, 'TABLE_SCHEMA', 'TABLE_NAME');
+  const base = `SELECT ${databaseType === 'sqlserver' ? `TOP ${sourceTableLimit} ` : ''}TABLE_SCHEMA AS table_schema, TABLE_NAME AS table_name
     FROM INFORMATION_SCHEMA.TABLES
-    WHERE TABLE_TYPE IN ('BASE TABLE', 'TABLE')
+    WHERE TABLE_TYPE IN ('BASE TABLE', 'TABLE')${predicate ? ` AND ${predicate}` : ''}
     ORDER BY TABLE_SCHEMA, TABLE_NAME`;
-  return databaseType === 'sqlserver' ? base : `${base} LIMIT 1000`;
+  return databaseType === 'sqlserver' ? base : `${base} LIMIT ${sourceTableLimit}`;
 };
+
+// remote_query wraps the statement as a derived table, and SQL Server rejects ORDER BY there
+// unless TOP, OFFSET or FOR XML is present.
+const orderBySuffix = (databaseType: z.infer<typeof sourceDatabaseType>) =>
+  databaseType === 'sqlserver' ? ' OFFSET 0 ROWS' : '';
 
 const columnsSql = (databaseType: z.infer<typeof sourceDatabaseType>, sourceSchema: string, table: string) => {
   const schema = sqlLiteral(sourceSchema);
@@ -316,7 +392,7 @@ const columnsSql = (databaseType: z.infer<typeof sourceDatabaseType>, sourceSche
         AND tc.TABLE_SCHEMA = ${schema} AND tc.TABLE_NAME = ${tableNameValue}
     ) pk ON 1 = 1
     WHERE c.TABLE_SCHEMA = ${schema} AND c.TABLE_NAME = ${tableNameValue}
-    ORDER BY c.ORDINAL_POSITION`;
+    ORDER BY c.ORDINAL_POSITION${orderBySuffix(databaseType)}`;
 };
 
 const columnsBatchSql = (
@@ -366,7 +442,7 @@ const columnsBatchSql = (
       WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
     ) pk ON pk.TABLE_SCHEMA = c.TABLE_SCHEMA AND pk.TABLE_NAME = c.TABLE_NAME AND pk.COLUMN_NAME = c.COLUMN_NAME
     WHERE ${filter}
-    ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION`;
+    ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION${orderBySuffix(databaseType)}`;
 };
 
 async function groupNeedsCdcPipeline(catalog: string, schema: string, ingestionGroup: string) {
@@ -449,41 +525,50 @@ async function ensureCdcPipeline({
 
   if (existingPipelineId) {
     await workspace.pipelines.update({ pipeline_id: existingPipelineId, ...pipelineSettings });
+    logger.info('pipeline.updated', { pipelineId: existingPipelineId, pipelineName, ingestionGroup });
     return existingPipelineId;
   }
   const created = await workspace.pipelines.create(pipelineSettings);
   if (!created.pipeline_id) throw new Error('Databricks created the CDC pipeline without returning an ID');
+  logger.info('pipeline.created', { pipelineId: created.pipeline_id, pipelineName, ingestionGroup });
   return created.pipeline_id;
 }
-
-const handleError = (res: { status(code: number): { json(value: unknown): void } }, error: unknown) => {
-  const message = error instanceof Error ? error.message : 'Unexpected error';
-  res.status(error instanceof z.ZodError ? 400 : 500).json({ error: message });
-};
 
 await createApp({
   plugins: [analytics(), server()],
   onPluginsReady(appkit) {
     appkit.server.extend((app) => {
-      app.post('/api/source-tables', async (req, res) => {
-        try {
+      app.use(requestLogging());
+
+      app.post(
+        '/api/client-logs',
+        apiRoute('client_logs', (req, res) => {
+          const batch = clientLogBatchSchema.parse(req.body);
+          logClientEvents(req, batch);
+          res.status(204).end();
+        })
+      );
+
+      app.post(
+        '/api/source-tables',
+        apiRoute('source_tables', async (req, res) => {
           const body = sourceDiscoverySchema.parse(req.body);
           const response = await withDiscoveryConnection(body, (connectionName) =>
             remoteQuery(
               connectionName,
               body.connectionName ? undefined : body.database,
-              listTablesSql(body.databaseType),
+              listTablesSql(body.databaseType, body.tableFilter),
               body.databaseType
             )
           );
-          res.json({ tables: responseRows(response) });
-        } catch (error) {
-          handleError(res, error);
-        }
-      });
+          const tables = responseRows(response);
+          res.json({ tables, truncated: tables.length >= sourceTableLimit });
+        })
+      );
 
-      app.post('/api/source-columns', async (req, res) => {
-        try {
+      app.post(
+        '/api/source-columns',
+        apiRoute('source_columns', async (req, res) => {
           const body = sourceColumnsSchema.parse(req.body);
           const response = await withDiscoveryConnection(body, (connectionName) =>
             remoteQuery(
@@ -494,13 +579,12 @@ await createApp({
             )
           );
           res.json({ columns: responseRows(response) });
-        } catch (error) {
-          handleError(res, error);
-        }
-      });
+        })
+      );
 
-      app.post('/api/source-columns-batch', async (req, res) => {
-        try {
+      app.post(
+        '/api/source-columns-batch',
+        apiRoute('source_columns_batch', async (req, res) => {
           const body = sourceColumnsBatchSchema.parse(req.body);
           const rows = await withDiscoveryConnection(body, async (connectionName) => {
             const response = await remoteQuery(
@@ -531,13 +615,12 @@ await createApp({
             columns: grouped.get(`${table.sourceSchema}\u0000${table.table}`.toLowerCase()) ?? [],
           }));
           res.json({ tables });
-        } catch (error) {
-          handleError(res, error);
-        }
-      });
+        })
+      );
 
-      app.post('/api/config', async (req, res) => {
-        try {
+      app.post(
+        '/api/config',
+        apiRoute('config_save', async (req, res) => {
           const body = configSchema.parse(req.body);
           const target = tableName(body.catalog, body.schema, 'jdbc_ingestion_config');
           await execute(
@@ -572,7 +655,7 @@ await createApp({
               parameter('target_table_fqn', body.targetTableFqn),
               parameter('ingestion_type', body.ingestionType),
               parameter('key_columns', body.keyColumns),
-              parameter('watermark_column', body.watermarkColumn),
+              parameter('watermark_column', body.epicCsaEnabled ? null : body.watermarkColumn),
               parameter('partition_column', body.partitionColumn),
               parameter('predicate_column', body.predicateColumn),
               parameter('epic_csa_enabled', String(body.epicCsaEnabled), 'BOOLEAN'),
@@ -588,27 +671,37 @@ await createApp({
               parameter('enabled', String(body.enabled), 'BOOLEAN'),
             ]
           );
+          logger.info('config.saved', {
+            catalog: body.catalog,
+            schema: body.schema,
+            ingestionGroup: body.ingestionGroup,
+            sourceTableName: body.sourceTableName,
+          });
           res.json({ ok: true });
-        } catch (error) {
-          handleError(res, error);
-        }
-      });
+        })
+      );
 
-      app.delete('/api/config', async (req, res) => {
-        try {
+      app.delete(
+        '/api/config',
+        apiRoute('config_delete', async (req, res) => {
           const body = keySchema.parse(req.body);
           await execute(
             `DELETE FROM ${tableName(body.catalog, body.schema, 'jdbc_ingestion_config')} WHERE ingestion_group=:ingestion_group AND source_table_name=:source_table_name`,
             [parameter('ingestion_group', body.ingestionGroup), parameter('source_table_name', body.sourceTableName)]
           );
+          logger.info('config.deleted', {
+            catalog: body.catalog,
+            schema: body.schema,
+            ingestionGroup: body.ingestionGroup,
+            sourceTableName: body.sourceTableName,
+          });
           res.json({ ok: true });
-        } catch (error) {
-          handleError(res, error);
-        }
-      });
+        })
+      );
 
-      app.patch('/api/watermark', async (req, res) => {
-        try {
+      app.patch(
+        '/api/watermark',
+        apiRoute('watermark_update', async (req, res) => {
           const body = watermarkSchema.parse(req.body);
           await execute(
             `UPDATE ${tableName(body.catalog, body.schema, 'jdbc_ingestion_watermark')} SET last_watermark=:last_watermark, status=:status, last_run_timestamp=current_timestamp(), last_error=NULL WHERE ingestion_group=:ingestion_group AND source_table_name=:source_table_name`,
@@ -619,27 +712,38 @@ await createApp({
               parameter('source_table_name', body.sourceTableName),
             ]
           );
+          logger.info('watermark.updated', {
+            catalog: body.catalog,
+            schema: body.schema,
+            ingestionGroup: body.ingestionGroup,
+            sourceTableName: body.sourceTableName,
+            status: body.status,
+          });
           res.json({ ok: true });
-        } catch (error) {
-          handleError(res, error);
-        }
-      });
+        })
+      );
 
-      app.delete('/api/watermark', async (req, res) => {
-        try {
+      app.delete(
+        '/api/watermark',
+        apiRoute('watermark_delete', async (req, res) => {
           const body = keySchema.parse(req.body);
           await execute(
             `DELETE FROM ${tableName(body.catalog, body.schema, 'jdbc_ingestion_watermark')} WHERE ingestion_group=:ingestion_group AND source_table_name=:source_table_name`,
             [parameter('ingestion_group', body.ingestionGroup), parameter('source_table_name', body.sourceTableName)]
           );
+          logger.info('watermark.deleted', {
+            catalog: body.catalog,
+            schema: body.schema,
+            ingestionGroup: body.ingestionGroup,
+            sourceTableName: body.sourceTableName,
+          });
           res.json({ ok: true });
-        } catch (error) {
-          handleError(res, error);
-        }
-      });
+        })
+      );
 
-      app.get('/api/jobs', async (_req, res) => {
-        try {
+      app.get(
+        '/api/jobs',
+        apiRoute('jobs_list', async (_req, res) => {
           const visibleJobs = [];
           for await (const job of workspace.jobs.list({ limit: 100, expand_tasks: false })) visibleJobs.push(job);
           const workspaceUrl = workspaceBaseUrl();
@@ -680,20 +784,16 @@ await createApp({
             );
             result.push(...summaries);
           }
+          logger.debug('jobs.listed', { jobCount: result.length });
           res.json({ jobs: result });
-        } catch (error) {
-          handleError(res, error);
-        }
-      });
+        })
+      );
 
-      app.post('/api/jobs', async (req, res) => {
-        try {
+      app.post(
+        '/api/jobs',
+        apiRoute('jobs_save', async (req, res) => {
           const body = jobPayloadSchema.parse(req.body);
-          const hasIncrementalSources = await groupNeedsCdcPipeline(
-            body.catalog,
-            body.schema,
-            body.ingestionGroup
-          );
+          const hasIncrementalSources = await groupNeedsCdcPipeline(body.catalog, body.schema, body.ingestionGroup);
           const cdcPipelineId = hasIncrementalSources
             ? await ensureCdcPipeline({
                 pipelineId: body.cdcPipelineId,
@@ -802,30 +902,39 @@ await createApp({
           for await (const job of workspace.jobs.list({ name, limit: 25, expand_tasks: false })) {
             if (job.settings?.name === name) existing.push(job);
           }
-          if (existing[0]?.job_id) {
-            await workspace.jobs.reset({ job_id: existing[0].job_id, new_settings: settings });
-            res.json({ jobId: existing[0].job_id, pipelineId: cdcPipelineId, action: 'updated' });
+          const existingJobId = existing[0]?.job_id;
+          let jobId = existingJobId;
+          if (existingJobId) {
+            await workspace.jobs.reset({ job_id: existingJobId, new_settings: settings });
           } else {
-            const created = await workspace.jobs.create(settings as jobs.CreateJob);
-            res.json({ jobId: created.job_id, pipelineId: cdcPipelineId, action: 'created' });
+            jobId = (await workspace.jobs.create(settings as jobs.CreateJob)).job_id;
           }
-        } catch (error) {
-          handleError(res, error);
-        }
-      });
+          const action = existingJobId ? 'updated' : 'created';
+          logger.info('jobs.saved', {
+            action,
+            jobId,
+            name,
+            ingestionGroup: body.ingestionGroup,
+            cdcPipelineId,
+            computeMode: body.compute.mode,
+          });
+          res.json({ jobId, pipelineId: cdcPipelineId, action });
+        })
+      );
 
-      app.post('/api/jobs/:jobId/run', async (req, res) => {
-        try {
+      app.post(
+        '/api/jobs/:jobId/run',
+        apiRoute('jobs_run', async (req, res) => {
           const jobId = z.coerce.number().int().positive().parse(req.params.jobId);
           const run = await workspace.jobs.runNow({ job_id: jobId });
+          logger.info('jobs.run_started', { jobId, runId: run.run_id });
           res.json({ runId: run.run_id });
-        } catch (error) {
-          handleError(res, error);
-        }
-      });
+        })
+      );
 
-      app.patch('/api/jobs/:jobId/schedule', async (req, res) => {
-        try {
+      app.patch(
+        '/api/jobs/:jobId/schedule',
+        apiRoute('jobs_schedule', async (req, res) => {
           const body = jobSchedulePayloadSchema.parse({
             ...req.body,
             jobId: z.coerce.number().parse(req.params.jobId),
@@ -844,11 +953,16 @@ await createApp({
           } else {
             await workspace.jobs.update({ job_id: body.jobId, fields_to_remove: ['schedule'] });
           }
+          logger.info('jobs.schedule_updated', {
+            jobId: body.jobId,
+            enabled: body.enabled,
+            pauseStatus: body.pauseStatus,
+          });
           res.json({ ok: true });
-        } catch (error) {
-          handleError(res, error);
-        }
-      });
+        })
+      );
+
+      logger.info('server.routes_registered', { nodeEnv: process.env.NODE_ENV ?? 'development' });
     });
   },
 });

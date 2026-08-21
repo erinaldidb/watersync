@@ -65,6 +65,8 @@ import {
   TriangleAlert,
   Workflow,
 } from 'lucide-react';
+import { api } from './lib/api';
+import { reportError, reportWarning, useReportedFailure } from './lib/logging';
 
 type Location = { catalog: string; schema: string };
 type Context = { location: Location; setLocation: (location: Location) => void; revision: number; refresh: () => void };
@@ -148,19 +150,6 @@ type TableDraft = {
 };
 type InferenceProgress = { completed: number; total: number };
 
-const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
-  const response = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...init });
-  const body: unknown = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const detail =
-      typeof body === 'object' && body !== null && 'error' in body && typeof body.error === 'string'
-        ? body.error
-        : undefined;
-    throw new Error(detail ?? `Request failed (${response.status})`);
-  }
-  return body as T;
-};
-const errorMessage = (value: unknown) => (value instanceof Error ? value.message : 'Unexpected error');
 const formString = (form: FormData, name: string, fallback: string) => {
   const value = form.get(name);
   return typeof value === 'string' && value ? value : fallback;
@@ -185,8 +174,10 @@ const savedLocation = (): Location => {
       if (value.catalog === 'main' && value.schema === 'watersync') return defaultLocation;
       return { catalog: value.catalog, schema: value.schema };
     }
-  } catch {
-    /* Fall through to defaults. */
+  } catch (error) {
+    reportWarning('location.restore_failed', 'Stored metadata location could not be parsed; using defaults', {
+      detail: String(error).slice(0, 200),
+    });
   }
   return defaultLocation;
 };
@@ -342,6 +333,7 @@ function OverviewPage() {
     [location, revision]
   );
   const { data, loading, error } = useAnalyticsQuery('config_summary', params);
+  useReportedFailure('query.config_summary', error, location);
   const row = data?.[0];
   return (
     <>
@@ -533,6 +525,7 @@ function ConfigPage() {
     [location, search, revision]
   );
   const { data, loading, error } = useAnalyticsQuery('config_entries', params);
+  useReportedFailure('query.config_entries', error, { ...location, search });
   const remove = async (row: ConfigRow) => {
     if (!confirm(`Delete ${row.ingestion_group} / ${row.source_table_name}?`)) return;
     try {
@@ -546,7 +539,13 @@ function ConfigPage() {
       });
       refresh();
     } catch (e) {
-      setMessage(errorMessage(e));
+      setMessage(
+        reportError('config.delete', e, {
+          ...location,
+          ingestionGroup: row.ingestion_group,
+          sourceTableName: row.source_table_name,
+        })
+      );
     }
   };
   return (
@@ -694,6 +693,19 @@ const stringTypes = ['char', 'varchar', 'nvarchar', 'text', 'string'];
 const isType = (column: SourceColumn, types: string[]) =>
   types.some((type) => column.data_type.toLowerCase().includes(type));
 const safeTargetName = (value: string) => value.replace(/[^A-Za-z0-9_]/g, '_').toLowerCase();
+const sourceTableLimit = 1000;
+// Mirrors the server predicate: "schema.table" narrows both sides, anything else matches either.
+const matchesTableFilter = (table: SourceTable, filter: string) => {
+  const value = filter.trim().toLowerCase();
+  if (!value) return true;
+  const schema = table.table_schema.toLowerCase();
+  const name = table.table_name.toLowerCase();
+  const separator = value.lastIndexOf('.');
+  if (separator === -1) return schema.includes(value) || name.includes(value);
+  const schemaPart = value.slice(0, separator).trim();
+  const tablePart = value.slice(separator + 1).trim();
+  return (!schemaPart || schema.includes(schemaPart)) && (!tablePart || name.includes(tablePart));
+};
 
 function DiscoveryDialog({
   open,
@@ -720,7 +732,10 @@ function DiscoveryDialog({
   const [secretScope, setSecretScope] = useState('');
   const [secretKey, setSecretKey] = useState('');
   const [tables, setTables] = useState<SourceTable[]>([]);
+  const [tablesTruncated, setTablesTruncated] = useState(false);
   const [tableFilter, setTableFilter] = useState('');
+  const [appliedTableFilter, setAppliedTableFilter] = useState<string | null>(null);
+  const [searchingTables, setSearchingTables] = useState(false);
   const [selectedTables, setSelectedTables] = useState<SourceTable[]>([]);
   const [ingestionType, setIngestionType] = useState('incremental');
   const [epicCsa, setEpicCsa] = useState(false);
@@ -738,11 +753,14 @@ function DiscoveryDialog({
     setStep(1);
     setError(null);
     setTables([]);
+    setTablesTruncated(false);
     setSelectedTables([]);
     setDrafts([]);
     setReviewPage(0);
     setConfirmedPages([]);
     setTableFilter('');
+    setAppliedTableFilter(null);
+    setSearchingTables(false);
     setBaseTargetFqn(`${location.catalog}.${location.schema}`);
     setBaseStagingFqn(`${location.catalog}.${location.schema}`);
     setInferenceProgress(null);
@@ -752,44 +770,68 @@ function DiscoveryDialog({
     if (!value) reset();
     onOpenChange(value);
   };
+  const fetchSourceTables = async (filter: string) => {
+    const result = await api<{ tables: SourceTable[]; truncated?: boolean }>('/api/source-tables', {
+      method: 'POST',
+      body: JSON.stringify({
+        connectionName: connectionMode === 'uc' ? connectionName : '',
+        jdbcUrl: connectionMode === 'jdbc' ? jdbcUrl : '',
+        jdbcUser: connectionMode === 'jdbc' ? jdbcUser : '',
+        jdbcSecretScope: connectionMode === 'jdbc' ? secretScope : '',
+        jdbcSecretKey: connectionMode === 'jdbc' ? secretKey : '',
+        database,
+        databaseType,
+        tableFilter: filter,
+      }),
+    });
+    setTables(result.tables);
+    setTablesTruncated(Boolean(result.truncated));
+    setAppliedTableFilter(filter);
+  };
   const loadTables = async () => {
     setBusy(true);
     setInferenceProgress(null);
     setError(null);
     setSelectedTables([]);
     try {
-      const result = await api<{ tables: SourceTable[] }>('/api/source-tables', {
-        method: 'POST',
-        body: JSON.stringify({
-          connectionName: connectionMode === 'uc' ? connectionName : '',
-          jdbcUrl: connectionMode === 'jdbc' ? jdbcUrl : '',
-          jdbcUser: connectionMode === 'jdbc' ? jdbcUser : '',
-          jdbcSecretScope: connectionMode === 'jdbc' ? secretScope : '',
-          jdbcSecretKey: connectionMode === 'jdbc' ? secretKey : '',
-          database,
-          databaseType,
-        }),
-      });
-      setTables(result.tables);
+      await fetchSourceTables(tableFilter);
     } catch (value) {
-      setError(errorMessage(value));
+      setError(reportError('discovery.load_tables', value, { databaseType, connectionMode, tableFilter }));
     } finally {
       setBusy(false);
     }
   };
+  useEffect(() => {
+    if (busy || appliedTableFilter === null || tableFilter.trim() === appliedTableFilter.trim()) return;
+    const timer = setTimeout(() => {
+      setSearchingTables(true);
+      setError(null);
+      fetchSourceTables(tableFilter)
+        .catch((value: unknown) =>
+          setError(reportError('discovery.search_tables', value, { databaseType, connectionMode, tableFilter }))
+        )
+        .finally(() => setSearchingTables(false));
+    }, 500);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tableFilter, appliedTableFilter, busy]);
   const inferColumns = (next: SourceColumn[]) => {
     const primary = next.filter((column) => column.is_primary_key === '1').map((column) => column.column_name);
     const idFallback = next.find((column) => /(^id$|_id$)/i.test(column.column_name) && column.is_nullable === 'NO');
     const key = primary[0] ?? idFallback?.column_name ?? next[0]?.column_name ?? 'none';
-    const watermark =
-      next.find(
-        (column) => isType(column, timestampTypes) && /(update|modified|change|timestamp|date)/i.test(column.column_name)
-      ) ??
-      next.find((column) => isType(column, timestampTypes)) ??
-      next.find(
-        (column) => isType(column, temporalTypes) && /(update|modified|change|timestamp|date)/i.test(column.column_name)
-      ) ??
-      next.find((column) => isType(column, temporalTypes));
+    // EPIC CSA sequences changes from the CSA table, so no timestamp watermark is ever read.
+    const watermark = epicCsa
+      ? undefined
+      : (next.find(
+          (column) =>
+            isType(column, timestampTypes) && /(update|modified|change|timestamp|date)/i.test(column.column_name)
+        ) ??
+        next.find((column) => isType(column, timestampTypes)) ??
+        next.find(
+          (column) =>
+            isType(column, temporalTypes) && /(update|modified|change|timestamp|date)/i.test(column.column_name)
+        ) ??
+        next.find((column) => isType(column, temporalTypes)));
     const partition =
       next.find((column) => column.column_name === key && isType(column, numericTypes)) ??
       next.find((column) => isType(column, numericTypes) && column.is_nullable === 'NO');
@@ -838,7 +880,10 @@ function DiscoveryDialog({
             columns: resultTable.columns,
             ...inferColumns(resultTable.columns),
             targetFqn: `${baseTargetFqn.replace(/\.$/, '')}.${target}`,
-            stagingFqn: ingestionType === 'incremental' || autoCdcFromSnapshot ? `${baseStagingFqn.replace(/\.$/, '')}.staging_${target}` : '',
+            stagingFqn:
+              ingestionType === 'incremental' || autoCdcFromSnapshot
+                ? `${baseStagingFqn.replace(/\.$/, '')}.staging_${target}`
+                : '',
           };
         });
         setDrafts((current) => [...current, ...pageDrafts]);
@@ -850,7 +895,13 @@ function DiscoveryDialog({
       }
       setInferenceProgress(null);
     } catch (value) {
-      setError(errorMessage(value));
+      setError(
+        reportError('discovery.infer_columns', value, {
+          databaseType,
+          connectionMode,
+          tableCount: selectedTables.length,
+        })
+      );
     } finally {
       setBusy(false);
     }
@@ -871,7 +922,7 @@ function DiscoveryDialog({
             targetTableFqn: draft.targetFqn,
             ingestionType,
             keyColumns: draft.keyColumn === 'none' ? null : draft.keyColumn,
-            watermarkColumn: draft.watermarkColumn === 'none' ? null : draft.watermarkColumn,
+            watermarkColumn: epicCsa || draft.watermarkColumn === 'none' ? null : draft.watermarkColumn,
             partitionColumn: draft.partitionColumn === 'none' ? null : draft.partitionColumn,
             predicateColumn: draft.predicateColumn === 'none' ? null : draft.predicateColumn,
             epicCsaEnabled: epicCsa,
@@ -891,14 +942,24 @@ function DiscoveryDialog({
       onSaved();
       reset();
     } catch (value) {
-      setError(errorMessage(value));
+      setError(
+        reportError('discovery.save_configs', value, {
+          ...location,
+          ingestionGroup: group,
+          ingestionType,
+          draftCount: drafts.length,
+        })
+      );
     } finally {
       setBusy(false);
     }
   };
-  const filteredTables = tables.filter((table) =>
-    `${table.table_schema}.${table.table_name}`.toLowerCase().includes(tableFilter.toLowerCase())
-  );
+  // Once the source search has returned for the current term the list is already narrowed; the local
+  // pass only keeps the list responsive while a newly typed term is still debouncing.
+  const filteredTables =
+    appliedTableFilter !== null && appliedTableFilter.trim() === tableFilter.trim()
+      ? tables
+      : tables.filter((table) => matchesTableFilter(table, tableFilter));
   const canContinue = Boolean(group && selectedTables.length);
   const canLoadTables =
     connectionMode === 'uc'
@@ -1147,12 +1208,15 @@ function DiscoveryDialog({
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">Available tables</CardTitle>
-                <CardDescription>Select every table you want to replicate.</CardDescription>
+                <CardDescription>
+                  Select every table you want to replicate. The search runs against the source database, so tables
+                  outside the first {sourceTableLimit.toLocaleString()} results are still reachable.
+                </CardDescription>
               </CardHeader>
               <CardContent>
                 {busy && !tables.length ? (
                   <Skeleton className="h-56" />
-                ) : !tables.length ? (
+                ) : appliedTableFilter === null ? (
                   <Empty>
                     <EmptyHeader>
                       <EmptyTitle>No tables loaded</EmptyTitle>
@@ -1166,7 +1230,7 @@ function DiscoveryDialog({
                     <div className="mb-4 flex flex-wrap items-center gap-3">
                       <Input
                         aria-label="Filter available tables"
-                        placeholder="Filter schema or table"
+                        placeholder="Search schema or table, for example dbo.customer"
                         value={tableFilter}
                         onChange={(event) => setTableFilter(event.target.value)}
                         className="min-w-64 flex-1"
@@ -1196,42 +1260,63 @@ function DiscoveryDialog({
                         </Button>
                       </div>
                     </div>
-                    <div className="source-table-list">
-                      {filteredTables.map((table) => {
-                        const selected = selectedTables.some(
-                          (selectedTable) =>
-                            selectedTable.table_schema === table.table_schema &&
-                            selectedTable.table_name === table.table_name
-                        );
-                        return (
-                          <button
-                            type="button"
-                            key={`${table.table_schema}.${table.table_name}`}
-                            className={`source-table-option ${selected ? 'source-table-option-selected' : ''}`}
-                            onClick={() =>
-                              setSelectedTables((current) =>
-                                selected
-                                  ? current.filter(
-                                      (selectedTable) =>
-                                        selectedTable.table_schema !== table.table_schema ||
-                                        selectedTable.table_name !== table.table_name
-                                    )
-                                  : [...current, table]
-                              )
-                            }
-                          >
-                            <Checkbox
-                              checked={selected}
-                              aria-label={`Select ${table.table_schema}.${table.table_name}`}
-                            />
-                            <span className="min-w-0 truncate">
-                              {table.table_schema}.<strong>{table.table_name}</strong>
-                            </span>
-                            {selected && <CheckCircle2 className="ml-auto h-4 w-4" />}
-                          </button>
-                        );
-                      })}
-                    </div>
+                    {searchingTables ? (
+                      <Skeleton className="h-56" />
+                    ) : !filteredTables.length ? (
+                      <Empty>
+                        <EmptyHeader>
+                          <EmptyTitle>No matching tables</EmptyTitle>
+                          <EmptyDescription>
+                            {tableFilter.trim()
+                              ? `No source table matches “${tableFilter.trim()}”. Try a shorter search term.`
+                              : 'The source connection returned no tables.'}
+                          </EmptyDescription>
+                        </EmptyHeader>
+                      </Empty>
+                    ) : (
+                      <div className="source-table-list">
+                        {filteredTables.map((table) => {
+                          const selected = selectedTables.some(
+                            (selectedTable) =>
+                              selectedTable.table_schema === table.table_schema &&
+                              selectedTable.table_name === table.table_name
+                          );
+                          return (
+                            <button
+                              type="button"
+                              key={`${table.table_schema}.${table.table_name}`}
+                              className={`source-table-option ${selected ? 'source-table-option-selected' : ''}`}
+                              onClick={() =>
+                                setSelectedTables((current) =>
+                                  selected
+                                    ? current.filter(
+                                        (selectedTable) =>
+                                          selectedTable.table_schema !== table.table_schema ||
+                                          selectedTable.table_name !== table.table_name
+                                      )
+                                    : [...current, table]
+                                )
+                              }
+                            >
+                              <Checkbox
+                                checked={selected}
+                                aria-label={`Select ${table.table_schema}.${table.table_name}`}
+                              />
+                              <span className="min-w-0 truncate">
+                                {table.table_schema}.<strong>{table.table_name}</strong>
+                              </span>
+                              {selected && <CheckCircle2 className="ml-auto h-4 w-4" />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {tablesTruncated && (
+                      <p className="mt-3 text-xs text-muted-foreground">
+                        Showing the first {sourceTableLimit.toLocaleString()} matches. Refine the search to reach tables
+                        beyond this limit.
+                      </p>
+                    )}
                   </>
                 )}
               </CardContent>
@@ -1279,7 +1364,9 @@ function DiscoveryDialog({
                     />
                     <span>
                       <strong>Auto CDC from snapshots</strong>
-                      <small>Compare each full snapshot with the previous version and maintain SCD Type 2 history.</small>
+                      <small>
+                        Compare each full snapshot with the previous version and maintain SCD Type 2 history.
+                      </small>
                     </span>
                   </label>
                 )}
@@ -1551,7 +1638,10 @@ function ConfigDialog({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [ingestionType, setIngestionType] = useState(row?.ingestion_type ?? 'incremental');
+  const [epicCsa, setEpicCsa] = useState(row?.epic_csa_enabled ?? false);
   useEffect(() => setIngestionType(row?.ingestion_type ?? 'incremental'), [row, open]);
+  useEffect(() => setEpicCsa(row?.epic_csa_enabled ?? false), [row, open]);
+  const csaMode = ingestionType === 'incremental' && epicCsa;
   const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setBusy(true);
@@ -1570,10 +1660,10 @@ function ConfigDialog({
           targetTableFqn: f.get('target_fqn'),
           ingestionType: f.get('type'),
           keyColumns: f.get('keys') || null,
-          watermarkColumn: f.get('watermark') || null,
+          watermarkColumn: csaMode ? null : f.get('watermark') || null,
           partitionColumn: f.get('partition') || null,
           predicateColumn: f.get('predicate') || null,
-          epicCsaEnabled: ingestionType === 'incremental' && f.get('epic') === 'on',
+          epicCsaEnabled: csaMode,
           autoCdcFromSnapshot: f.get('auto_cdc_from_snapshot') === 'on',
           jdbcUrl: f.get('jdbc_url') || null,
           jdbcUser: f.get('jdbc_user') || null,
@@ -1588,7 +1678,14 @@ function ConfigDialog({
       });
       onSaved();
     } catch (x) {
-      setError((x as Error).message);
+      setError(
+        reportError('config.save', x, {
+          ...location,
+          ingestionGroup: formString(f, 'group', ''),
+          sourceTableName: formString(f, 'source', ''),
+          ingestionType,
+        })
+      );
     } finally {
       setBusy(false);
     }
@@ -1620,7 +1717,14 @@ function ConfigDialog({
                 <Field name="staging_fqn" label="Staging table FQN" value={row?.staging_table_fqn} />
                 <div>
                   <Label htmlFor="type">Ingestion type</Label>
-                  <Select name="type" value={ingestionType} onValueChange={setIngestionType}>
+                  <Select
+                    name="type"
+                    value={ingestionType}
+                    onValueChange={(value) => {
+                      setIngestionType(value);
+                      if (value === 'full') setEpicCsa(false);
+                    }}
+                  >
                     <SelectTrigger id="type" className="w-full">
                       <SelectValue />
                     </SelectTrigger>
@@ -1643,7 +1747,14 @@ function ConfigDialog({
             <TabsContent value="incremental" forceMount className="mt-4 data-[state=inactive]:hidden">
               <div className="grid gap-4 md:grid-cols-2">
                 <Field name="keys" label="Key columns" value={row?.key_columns} />
-                <Field name="watermark" label="Watermark column" value={row?.watermark_column} />
+                <Field
+                  key={`watermark-${csaMode}`}
+                  name="watermark"
+                  label="Watermark column"
+                  value={csaMode ? '' : row?.watermark_column}
+                  disabled={csaMode}
+                  hint={csaMode ? 'EPIC CSA tracks changes by sequence, so no watermark column is used.' : undefined}
+                />
                 <Field name="partition" label="Partition column" value={row?.partition_column} />
                 <Field name="predicate" label="Predicate column" value={row?.predicate_column} />
                 <Field
@@ -1654,7 +1765,8 @@ function ConfigDialog({
                 <Toggle
                   name="epic"
                   label="EPIC CSA mode"
-                  checked={ingestionType === 'incremental' && (row?.epic_csa_enabled ?? false)}
+                  checked={csaMode}
+                  onCheckedChange={setEpicCsa}
                   disabled={ingestionType === 'full'}
                 />
               </div>
@@ -1688,11 +1800,15 @@ function Field({
   label,
   value,
   required = false,
+  disabled = false,
+  hint,
 }: {
   name: string;
   label: string;
   value?: string | null;
   required?: boolean;
+  disabled?: boolean;
+  hint?: string;
 }) {
   return (
     <div className="space-y-2">
@@ -1702,7 +1818,9 @@ function Field({
         name={name}
         defaultValue={value ?? ''}
         required={required || name === 'group' || name === 'source'}
+        disabled={disabled}
       />
+      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
     </div>
   );
 }
@@ -1711,15 +1829,23 @@ function Toggle({
   label,
   checked,
   disabled = false,
+  onCheckedChange,
 }: {
   name: string;
   label: string;
   checked: boolean;
   disabled?: boolean;
+  onCheckedChange?: (checked: boolean) => void;
 }) {
   return (
     <label className={`flex items-center gap-3 rounded-md border p-3 text-sm ${disabled ? 'opacity-50' : ''}`}>
-      <Switch name={name} defaultChecked={checked} disabled={disabled} />
+      <Switch
+        name={name}
+        checked={onCheckedChange ? checked : undefined}
+        defaultChecked={onCheckedChange ? undefined : checked}
+        onCheckedChange={onCheckedChange}
+        disabled={disabled}
+      />
       {label}
     </label>
   );
@@ -1741,6 +1867,7 @@ function WatermarksPage() {
     [location, search, revision]
   );
   const { data, loading, error } = useAnalyticsQuery('watermark_entries', params);
+  useReportedFailure('query.watermark_entries', error, { ...location, search });
   const reset = async (row: WatermarkRow) => {
     if (
       !confirm(
@@ -1759,7 +1886,13 @@ function WatermarksPage() {
       });
       refresh();
     } catch (e) {
-      setMessage((e as Error).message);
+      setMessage(
+        reportError('watermark.delete', e, {
+          ...location,
+          ingestionGroup: row.ingestion_group,
+          sourceTableName: row.source_table_name,
+        })
+      );
     }
   };
   return (
@@ -1875,7 +2008,13 @@ function WatermarkDialog({
       });
       onSaved();
     } catch (x) {
-      setError((x as Error).message);
+      setError(
+        reportError('watermark.update', x, {
+          ...location,
+          ingestionGroup: row.ingestion_group,
+          sourceTableName: row.source_table_name,
+        })
+      );
     }
   };
   return (
@@ -1920,12 +2059,13 @@ function JobsPage() {
     loading: groupsLoading,
     error: groupsError,
   } = useAnalyticsQuery('ingestion_groups', groupParams);
+  useReportedFailure('query.ingestion_groups', groupsError, location);
   const load = () => {
     setLoading(true);
     setError(null);
     api<{ jobs: JobRow[] }>('/api/jobs')
       .then((x) => setJobs(x.jobs))
-      .catch((e) => setError(errorMessage(e)))
+      .catch((e: unknown) => setError(reportError('jobs.list', e)))
       .finally(() => setLoading(false));
   };
   useEffect(() => {
@@ -1939,7 +2079,7 @@ function JobsPage() {
       alert(`Run ${x.runId} started`);
       load();
     } catch (e) {
-      setError(errorMessage(e));
+      setError(reportError('jobs.run', e, { jobId: id }));
     } finally {
       setRunningJob(null);
     }
@@ -2171,7 +2311,7 @@ function JobDialog({
       alert(`Job ${result.jobId} ${result.action}`);
       onSaved();
     } catch (x) {
-      setError((x as Error).message);
+      setError(reportError('jobs.save', x, { ...location, ingestionGroup, computeMode }));
     } finally {
       setBusy(false);
     }
@@ -2514,7 +2654,7 @@ function ScheduleDialog({ job, onClose, onSaved }: { job: JobRow | null; onClose
       });
       onSaved();
     } catch (value) {
-      setError(errorMessage(value));
+      setError(reportError('jobs.schedule', value, { jobId: job.job_id, scheduleEnabled: enabled }));
     } finally {
       setBusy(false);
     }

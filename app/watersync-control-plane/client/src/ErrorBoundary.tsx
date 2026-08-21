@@ -1,6 +1,7 @@
 import React, { Component } from 'react';
 import type { ReactNode } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@databricks/appkit-ui/react';
+import { logSessionId, reportComponentError } from './lib/logging';
 
 interface Props {
   children: ReactNode;
@@ -27,8 +28,7 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
-    console.error('ErrorBoundary caught an error:', error);
-    console.error('Error details:', errorInfo);
+    reportComponentError('error_boundary', error, errorInfo.componentStack);
     this.setState({
       error,
       errorInfo,
@@ -63,6 +63,10 @@ export class ErrorBoundary extends Component<Props, State> {
                     <pre className="bg-muted p-3 rounded text-sm overflow-auto max-h-96">{this.state.error.stack}</pre>
                   </div>
                 )}
+                <p className="text-sm text-muted-foreground">
+                  This error was written to the application logs. Session reference:{' '}
+                  <code className="font-mono">{logSessionId()}</code>
+                </p>
               </div>
             </CardContent>
           </Card>
