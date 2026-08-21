@@ -65,6 +65,8 @@ import {
   TriangleAlert,
   Workflow,
 } from 'lucide-react';
+import { api } from './lib/api';
+import { reportError, reportWarning, useReportedFailure } from './lib/logging';
 
 type Location = { catalog: string; schema: string };
 type Context = { location: Location; setLocation: (location: Location) => void; revision: number; refresh: () => void };
@@ -148,19 +150,6 @@ type TableDraft = {
 };
 type InferenceProgress = { completed: number; total: number };
 
-const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
-  const response = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...init });
-  const body: unknown = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const detail =
-      typeof body === 'object' && body !== null && 'error' in body && typeof body.error === 'string'
-        ? body.error
-        : undefined;
-    throw new Error(detail ?? `Request failed (${response.status})`);
-  }
-  return body as T;
-};
-const errorMessage = (value: unknown) => (value instanceof Error ? value.message : 'Unexpected error');
 const formString = (form: FormData, name: string, fallback: string) => {
   const value = form.get(name);
   return typeof value === 'string' && value ? value : fallback;
@@ -185,8 +174,10 @@ const savedLocation = (): Location => {
       if (value.catalog === 'main' && value.schema === 'watersync') return defaultLocation;
       return { catalog: value.catalog, schema: value.schema };
     }
-  } catch {
-    /* Fall through to defaults. */
+  } catch (error) {
+    reportWarning('location.restore_failed', 'Stored metadata location could not be parsed; using defaults', {
+      detail: String(error).slice(0, 200),
+    });
   }
   return defaultLocation;
 };
@@ -342,6 +333,7 @@ function OverviewPage() {
     [location, revision]
   );
   const { data, loading, error } = useAnalyticsQuery('config_summary', params);
+  useReportedFailure('query.config_summary', error, location);
   const row = data?.[0];
   return (
     <>
@@ -533,6 +525,7 @@ function ConfigPage() {
     [location, search, revision]
   );
   const { data, loading, error } = useAnalyticsQuery('config_entries', params);
+  useReportedFailure('query.config_entries', error, { ...location, search });
   const remove = async (row: ConfigRow) => {
     if (!confirm(`Delete ${row.ingestion_group} / ${row.source_table_name}?`)) return;
     try {
@@ -546,7 +539,13 @@ function ConfigPage() {
       });
       refresh();
     } catch (e) {
-      setMessage(errorMessage(e));
+      setMessage(
+        reportError('config.delete', e, {
+          ...location,
+          ingestionGroup: row.ingestion_group,
+          sourceTableName: row.source_table_name,
+        })
+      );
     }
   };
   return (
@@ -797,7 +796,7 @@ function DiscoveryDialog({
     try {
       await fetchSourceTables(tableFilter);
     } catch (value) {
-      setError(errorMessage(value));
+      setError(reportError('discovery.load_tables', value, { databaseType, connectionMode, tableFilter }));
     } finally {
       setBusy(false);
     }
@@ -808,7 +807,9 @@ function DiscoveryDialog({
       setSearchingTables(true);
       setError(null);
       fetchSourceTables(tableFilter)
-        .catch((value) => setError(errorMessage(value)))
+        .catch((value: unknown) =>
+          setError(reportError('discovery.search_tables', value, { databaseType, connectionMode, tableFilter }))
+        )
         .finally(() => setSearchingTables(false));
     }, 500);
     return () => clearTimeout(timer);
@@ -818,16 +819,19 @@ function DiscoveryDialog({
     const primary = next.filter((column) => column.is_primary_key === '1').map((column) => column.column_name);
     const idFallback = next.find((column) => /(^id$|_id$)/i.test(column.column_name) && column.is_nullable === 'NO');
     const key = primary[0] ?? idFallback?.column_name ?? next[0]?.column_name ?? 'none';
-    const watermark =
-      next.find(
-        (column) =>
-          isType(column, timestampTypes) && /(update|modified|change|timestamp|date)/i.test(column.column_name)
-      ) ??
-      next.find((column) => isType(column, timestampTypes)) ??
-      next.find(
-        (column) => isType(column, temporalTypes) && /(update|modified|change|timestamp|date)/i.test(column.column_name)
-      ) ??
-      next.find((column) => isType(column, temporalTypes));
+    // EPIC CSA sequences changes from the CSA table, so no timestamp watermark is ever read.
+    const watermark = epicCsa
+      ? undefined
+      : (next.find(
+          (column) =>
+            isType(column, timestampTypes) && /(update|modified|change|timestamp|date)/i.test(column.column_name)
+        ) ??
+        next.find((column) => isType(column, timestampTypes)) ??
+        next.find(
+          (column) =>
+            isType(column, temporalTypes) && /(update|modified|change|timestamp|date)/i.test(column.column_name)
+        ) ??
+        next.find((column) => isType(column, temporalTypes)));
     const partition =
       next.find((column) => column.column_name === key && isType(column, numericTypes)) ??
       next.find((column) => isType(column, numericTypes) && column.is_nullable === 'NO');
@@ -891,7 +895,13 @@ function DiscoveryDialog({
       }
       setInferenceProgress(null);
     } catch (value) {
-      setError(errorMessage(value));
+      setError(
+        reportError('discovery.infer_columns', value, {
+          databaseType,
+          connectionMode,
+          tableCount: selectedTables.length,
+        })
+      );
     } finally {
       setBusy(false);
     }
@@ -912,7 +922,7 @@ function DiscoveryDialog({
             targetTableFqn: draft.targetFqn,
             ingestionType,
             keyColumns: draft.keyColumn === 'none' ? null : draft.keyColumn,
-            watermarkColumn: draft.watermarkColumn === 'none' ? null : draft.watermarkColumn,
+            watermarkColumn: epicCsa || draft.watermarkColumn === 'none' ? null : draft.watermarkColumn,
             partitionColumn: draft.partitionColumn === 'none' ? null : draft.partitionColumn,
             predicateColumn: draft.predicateColumn === 'none' ? null : draft.predicateColumn,
             epicCsaEnabled: epicCsa,
@@ -932,7 +942,14 @@ function DiscoveryDialog({
       onSaved();
       reset();
     } catch (value) {
-      setError(errorMessage(value));
+      setError(
+        reportError('discovery.save_configs', value, {
+          ...location,
+          ingestionGroup: group,
+          ingestionType,
+          draftCount: drafts.length,
+        })
+      );
     } finally {
       setBusy(false);
     }
@@ -1621,7 +1638,10 @@ function ConfigDialog({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [ingestionType, setIngestionType] = useState(row?.ingestion_type ?? 'incremental');
+  const [epicCsa, setEpicCsa] = useState(row?.epic_csa_enabled ?? false);
   useEffect(() => setIngestionType(row?.ingestion_type ?? 'incremental'), [row, open]);
+  useEffect(() => setEpicCsa(row?.epic_csa_enabled ?? false), [row, open]);
+  const csaMode = ingestionType === 'incremental' && epicCsa;
   const submit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setBusy(true);
@@ -1640,10 +1660,10 @@ function ConfigDialog({
           targetTableFqn: f.get('target_fqn'),
           ingestionType: f.get('type'),
           keyColumns: f.get('keys') || null,
-          watermarkColumn: f.get('watermark') || null,
+          watermarkColumn: csaMode ? null : f.get('watermark') || null,
           partitionColumn: f.get('partition') || null,
           predicateColumn: f.get('predicate') || null,
-          epicCsaEnabled: ingestionType === 'incremental' && f.get('epic') === 'on',
+          epicCsaEnabled: csaMode,
           autoCdcFromSnapshot: f.get('auto_cdc_from_snapshot') === 'on',
           jdbcUrl: f.get('jdbc_url') || null,
           jdbcUser: f.get('jdbc_user') || null,
@@ -1658,7 +1678,14 @@ function ConfigDialog({
       });
       onSaved();
     } catch (x) {
-      setError((x as Error).message);
+      setError(
+        reportError('config.save', x, {
+          ...location,
+          ingestionGroup: formString(f, 'group', ''),
+          sourceTableName: formString(f, 'source', ''),
+          ingestionType,
+        })
+      );
     } finally {
       setBusy(false);
     }
@@ -1690,7 +1717,14 @@ function ConfigDialog({
                 <Field name="staging_fqn" label="Staging table FQN" value={row?.staging_table_fqn} />
                 <div>
                   <Label htmlFor="type">Ingestion type</Label>
-                  <Select name="type" value={ingestionType} onValueChange={setIngestionType}>
+                  <Select
+                    name="type"
+                    value={ingestionType}
+                    onValueChange={(value) => {
+                      setIngestionType(value);
+                      if (value === 'full') setEpicCsa(false);
+                    }}
+                  >
                     <SelectTrigger id="type" className="w-full">
                       <SelectValue />
                     </SelectTrigger>
@@ -1713,7 +1747,14 @@ function ConfigDialog({
             <TabsContent value="incremental" forceMount className="mt-4 data-[state=inactive]:hidden">
               <div className="grid gap-4 md:grid-cols-2">
                 <Field name="keys" label="Key columns" value={row?.key_columns} />
-                <Field name="watermark" label="Watermark column" value={row?.watermark_column} />
+                <Field
+                  key={`watermark-${csaMode}`}
+                  name="watermark"
+                  label="Watermark column"
+                  value={csaMode ? '' : row?.watermark_column}
+                  disabled={csaMode}
+                  hint={csaMode ? 'EPIC CSA tracks changes by sequence, so no watermark column is used.' : undefined}
+                />
                 <Field name="partition" label="Partition column" value={row?.partition_column} />
                 <Field name="predicate" label="Predicate column" value={row?.predicate_column} />
                 <Field
@@ -1724,7 +1765,8 @@ function ConfigDialog({
                 <Toggle
                   name="epic"
                   label="EPIC CSA mode"
-                  checked={ingestionType === 'incremental' && (row?.epic_csa_enabled ?? false)}
+                  checked={csaMode}
+                  onCheckedChange={setEpicCsa}
                   disabled={ingestionType === 'full'}
                 />
               </div>
@@ -1758,11 +1800,15 @@ function Field({
   label,
   value,
   required = false,
+  disabled = false,
+  hint,
 }: {
   name: string;
   label: string;
   value?: string | null;
   required?: boolean;
+  disabled?: boolean;
+  hint?: string;
 }) {
   return (
     <div className="space-y-2">
@@ -1772,7 +1818,9 @@ function Field({
         name={name}
         defaultValue={value ?? ''}
         required={required || name === 'group' || name === 'source'}
+        disabled={disabled}
       />
+      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
     </div>
   );
 }
@@ -1781,15 +1829,23 @@ function Toggle({
   label,
   checked,
   disabled = false,
+  onCheckedChange,
 }: {
   name: string;
   label: string;
   checked: boolean;
   disabled?: boolean;
+  onCheckedChange?: (checked: boolean) => void;
 }) {
   return (
     <label className={`flex items-center gap-3 rounded-md border p-3 text-sm ${disabled ? 'opacity-50' : ''}`}>
-      <Switch name={name} defaultChecked={checked} disabled={disabled} />
+      <Switch
+        name={name}
+        checked={onCheckedChange ? checked : undefined}
+        defaultChecked={onCheckedChange ? undefined : checked}
+        onCheckedChange={onCheckedChange}
+        disabled={disabled}
+      />
       {label}
     </label>
   );
@@ -1811,6 +1867,7 @@ function WatermarksPage() {
     [location, search, revision]
   );
   const { data, loading, error } = useAnalyticsQuery('watermark_entries', params);
+  useReportedFailure('query.watermark_entries', error, { ...location, search });
   const reset = async (row: WatermarkRow) => {
     if (
       !confirm(
@@ -1829,7 +1886,13 @@ function WatermarksPage() {
       });
       refresh();
     } catch (e) {
-      setMessage((e as Error).message);
+      setMessage(
+        reportError('watermark.delete', e, {
+          ...location,
+          ingestionGroup: row.ingestion_group,
+          sourceTableName: row.source_table_name,
+        })
+      );
     }
   };
   return (
@@ -1945,7 +2008,13 @@ function WatermarkDialog({
       });
       onSaved();
     } catch (x) {
-      setError((x as Error).message);
+      setError(
+        reportError('watermark.update', x, {
+          ...location,
+          ingestionGroup: row.ingestion_group,
+          sourceTableName: row.source_table_name,
+        })
+      );
     }
   };
   return (
@@ -1990,12 +2059,13 @@ function JobsPage() {
     loading: groupsLoading,
     error: groupsError,
   } = useAnalyticsQuery('ingestion_groups', groupParams);
+  useReportedFailure('query.ingestion_groups', groupsError, location);
   const load = () => {
     setLoading(true);
     setError(null);
     api<{ jobs: JobRow[] }>('/api/jobs')
       .then((x) => setJobs(x.jobs))
-      .catch((e) => setError(errorMessage(e)))
+      .catch((e: unknown) => setError(reportError('jobs.list', e)))
       .finally(() => setLoading(false));
   };
   useEffect(() => {
@@ -2009,7 +2079,7 @@ function JobsPage() {
       alert(`Run ${x.runId} started`);
       load();
     } catch (e) {
-      setError(errorMessage(e));
+      setError(reportError('jobs.run', e, { jobId: id }));
     } finally {
       setRunningJob(null);
     }
@@ -2241,7 +2311,7 @@ function JobDialog({
       alert(`Job ${result.jobId} ${result.action}`);
       onSaved();
     } catch (x) {
-      setError((x as Error).message);
+      setError(reportError('jobs.save', x, { ...location, ingestionGroup, computeMode }));
     } finally {
       setBusy(false);
     }
@@ -2584,7 +2654,7 @@ function ScheduleDialog({ job, onClose, onSaved }: { job: JobRow | null; onClose
       });
       onSaved();
     } catch (value) {
-      setError(errorMessage(value));
+      setError(reportError('jobs.schedule', value, { jobId: job.job_id, scheduleEnabled: enabled }));
     } finally {
       setBusy(false);
     }

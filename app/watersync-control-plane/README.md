@@ -106,6 +106,36 @@ Run the production build:
 npm start
 ```
 
+## Logging and Diagnostics
+
+Every failure reaches the application logs, not just the screen. Both the server and the browser emit
+one-line JSON records on stdout/stderr, which is what `databricks apps logs` and the app's **Logs** tab show.
+
+```json
+{
+  "timestamp": "…",
+  "level": "error",
+  "event": "config_save.failed",
+  "requestId": "req_…",
+  "status": 500,
+  "error": { "message": "…", "stack": "…" }
+}
+```
+
+- **Server**: `server/logging.ts` owns the logger. Every `/api` request logs one `http.request` line with status
+  and duration; a failing route additionally logs `<route>.failed` with the stack, and failing SQL logs
+  `sql.statement_failed` with the statement summary. Uncaught exceptions and unhandled rejections are logged
+  before the process exits.
+- **Browser**: `client/src/lib/logging.ts` batches events to `POST /api/client-logs`, which re-emits them as
+  `client.<scope>` records. Component errors, unhandled rejections, window errors, failed API calls, and failed
+  analytics queries all go through it, so a user reporting "it showed me an error" leaves a trace.
+- **Correlation**: an error response carries the `requestId` it was logged under, the browser attaches that id
+  to its own report, and the error screen shows a per-tab session reference. Any of the three finds the rest.
+- **Redaction**: fields whose name looks like a credential (`secret`, `password`, `token`, …) are replaced with
+  `[redacted]`, and long values are truncated.
+- **Verbosity**: set `WATERSYNC_LOG_LEVEL` to `debug`, `info` (default), `warn`, or `error`. `debug` adds
+  per-statement SQL timings.
+
 ## Code Quality
 
 There are a few commands to help you with code quality:
