@@ -6,6 +6,7 @@ from pyspark.sql import functions as F
 
 from watersync.common import quote_sql_string
 from watersync.models import ReadResult
+from watersync.sql_dialect import sql_bigint_cast
 from watersync.workers.base import JdbcIngestionWorker
 
 logger = logging.getLogger(__name__)
@@ -35,8 +36,8 @@ class EpicCsaIngestionWorker(JdbcIngestionWorker):
 
     def get_csa_max_watermark(self) -> int | None:
         query = (
-            "(SELECT MAX(CAST(_TIMESTAMP_EXTRACT_KEY AS BIGINT)) AS max_csa_wm "
-            f"FROM {self.derive_csa_table_name()}) AS csa_max"
+            f"(SELECT MAX({sql_bigint_cast('_TIMESTAMP_EXTRACT_KEY', self.sql_dialect)}) AS max_csa_wm "
+            f"FROM {self.derive_csa_table_name()}) csa_max"
         )
         row = self.build_jdbc_reader(query).load().first()
         if row and row["max_csa_wm"] is not None:
@@ -56,7 +57,7 @@ class EpicCsaIngestionWorker(JdbcIngestionWorker):
             f"MAX(main.{self.config.partition_column}) AS max_val "
             f"FROM {self.derive_csa_table_name()} csa "
             f"LEFT JOIN {self.config.source_table_name} main ON {join_condition} "
-            f"WHERE {wm_filter}) AS bounds"
+            f"WHERE {wm_filter}) bounds"
         )
         row = self.build_jdbc_reader(bounds_query).load().first()
         if row is None or row["min_val"] is None or row["max_val"] is None:
@@ -79,7 +80,7 @@ class EpicCsaIngestionWorker(JdbcIngestionWorker):
             f"FROM {self.derive_csa_table_name()} csa "
             f"LEFT JOIN {self.config.source_table_name} main ON {join_condition} "
             f"WHERE {wm_filter}"
-            f") sub WHERE bucket > 1 GROUP BY bucket) AS bounds"
+            f") sub WHERE bucket > 1 GROUP BY bucket) bounds"
         )
         return sorted(
             row["boundary_val"]
@@ -88,7 +89,7 @@ class EpicCsaIngestionWorker(JdbcIngestionWorker):
         )
 
     def read_full_source_jdbc(self):
-        source_query = f"(SELECT * FROM {self.config.source_table_name}) AS source_data"
+        source_query = f"(SELECT * FROM {self.config.source_table_name}) source_data"
 
         if self.config.predicate_column:
             boundaries = self.build_predicate_boundaries()
@@ -129,9 +130,10 @@ class EpicCsaIngestionWorker(JdbcIngestionWorker):
             )
 
         join_condition = " AND ".join(f"csa.{key} = main.{key}" for key in join_keys)
+        csa_key_as_bigint = sql_bigint_cast("csa._TIMESTAMP_EXTRACT_KEY", self.sql_dialect)
         wm_filter = (
-            f"CAST(csa._TIMESTAMP_EXTRACT_KEY AS BIGINT) > {last_csa_watermark} "
-            f"AND CAST(csa._TIMESTAMP_EXTRACT_KEY AS BIGINT) <= {new_csa_watermark}"
+            f"{csa_key_as_bigint} > {last_csa_watermark} "
+            f"AND {csa_key_as_bigint} <= {new_csa_watermark}"
         )
         csa_key_aliases = ", ".join(
             f"csa.{key} AS _csa_key_{key}" for key in join_keys
@@ -140,7 +142,7 @@ class EpicCsaIngestionWorker(JdbcIngestionWorker):
             f"(SELECT csa._IS_DELETED, csa._UPDATE_DT AS _csa_update_dt, {csa_key_aliases}, main.* "
             f"FROM {self.derive_csa_table_name()} csa "
             f"LEFT JOIN {self.config.source_table_name} main ON {join_condition} "
-            f"WHERE {wm_filter}) AS csa_source"
+            f"WHERE {wm_filter}) csa_source"
         )
 
         if self.config.predicate_column:
