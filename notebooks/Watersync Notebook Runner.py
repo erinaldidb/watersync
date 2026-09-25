@@ -194,52 +194,6 @@ else:
 
 # COMMAND ----------
 
-# DBTITLE 1,Test CREATE CONNECTION with current Lakebase endpoint
-# Test CREATE CONNECTION + remote_query with the current Lakebase endpoint
-import uuid
-
-HOST = "ep-calm-waterfall-d8dg2cnk.database.us-east-2.cloud.databricks.com"
-USER = "ema_rina"
-DB = "databricks_postgres"
-db_pass = dbutils.secrets.get(catalog="serverless_pixels_catalog", schema="watersync", key="db_pass")
-db_pass_escaped = db_pass.replace("'", "''")
-conn_name = f"_watersync_diag_{uuid.uuid4().hex[:12]}"
-
-print(f"Host: {HOST}")
-print(f"User: {USER}")
-print(f"Password length: {len(db_pass)}")
-print(f"Connection: {conn_name}")
-
-try:
-    # Step 1: CREATE CONNECTION (mirrors discovery.ts)
-    spark.sql(f"""
-        CREATE CONNECTION `{conn_name}` TYPE POSTGRESQL OPTIONS (
-            host '{HOST}',
-            port '5432',
-            user '{USER}',
-            password '{db_pass_escaped}',
-            trustServerCertificate true
-        )
-    """)
-    print("\nCREATE CONNECTION: OK")
-
-    # Step 2: remote_query (mirrors discovery.ts)
-    result = spark.sql(f"""
-        SELECT * FROM remote_query('{conn_name}', database => '{DB}', query => 'SELECT 1 AS ping')
-    """)
-    display(result)
-    print("remote_query: OK")
-except Exception as e:
-    print(f"\nFAILED: {str(e)[:500]}")
-finally:
-    try:
-        spark.sql(f"DROP CONNECTION IF EXISTS `{conn_name}`")
-        print("Cleanup: OK")
-    except Exception as e2:
-        print(f"Cleanup failed: {e2}")
-
-# COMMAND ----------
-
 # DBTITLE 1,Upsert ingestion config rows
 # ── Upsert ingestion config rows ─────────────────────────────────────────────
 # Edit table_configs below and run this cell to add or update rows.
@@ -257,6 +211,7 @@ table_configs = [
         partition_column  = "patient_id",
         predicate_column  = None,
         epic_csa_enabled  = True,
+        auto_cdc_from_snapshot = False,
         #jdbc_url          = "postgresql://ep-billowing-king-d2gq9yas.database.us-east-1.cloud.databricks.com/databricks_postgres?sslmode=require",
         #jdbc_user         = "users",
         #jdbc_secret_scope = "slalom_jdbc",
@@ -278,6 +233,7 @@ table_configs = [
         partition_column  = "encounter_id",
         predicate_column  = None,
         epic_csa_enabled  = True,
+        auto_cdc_from_snapshot = False,
         #jdbc_url          = "postgresql://ep-billowing-king-d2gq9yas.database.us-east-1.cloud.databricks.com/databricks_postgres?sslmode=require",
         #jdbc_user         = "users",
         #jdbc_secret_scope = "slalom_jdbc",
@@ -307,6 +263,7 @@ _cfg_schema = StructType([
     StructField("partition_column",  StringType(),  True),
     StructField("predicate_column",  StringType(),  True),
     StructField("epic_csa_enabled",  BooleanType(), True),
+    StructField("auto_cdc_from_snapshot", BooleanType(), True),
     StructField("jdbc_url",          StringType(),  True),
     StructField("jdbc_user",         StringType(),  True),
     StructField("jdbc_secret_scope", StringType(),  True),
@@ -331,6 +288,7 @@ _rows = [
         r.get("partition_column"),
         r.get("predicate_column"),
         r.get("epic_csa_enabled", False),
+        r.get("auto_cdc_from_snapshot", False),
         r.get("jdbc_url"),
         r.get("jdbc_user"),
         r.get("jdbc_secret_scope"),
