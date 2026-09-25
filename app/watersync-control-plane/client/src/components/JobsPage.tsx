@@ -125,7 +125,7 @@ export function JobsPage() {
                   <div>
                     <CardTitle>{job.settings?.name ?? `Job ${job.job_id}`}</CardTitle>
                     <CardDescription>
-                      ID {job.job_id} \u00b7 created {displayTime(job.created_time)}
+                      ID {job.job_id} {'\u00b7'} created {displayTime(job.created_time)}
                     </CardDescription>
                   </div>
                   <Badge variant={statusVariant(runStatus(job.runs[0]))}>
@@ -358,7 +358,7 @@ function JobDialog({
                     <SelectContent>
                       {groups.map((group) => (
                         <SelectItem key={group.ingestion_group} value={group.ingestion_group}>
-                          {group.ingestion_group} \u00b7 {group.enabled_source_count} enabled sources
+                          {group.ingestion_group} {'\u00b7'} {group.enabled_source_count} enabled sources
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -377,7 +377,7 @@ function JobDialog({
                   <CardHeader className="pb-3">
                     <CardTitle className="text-base">Generated job</CardTitle>
                     <CardDescription>
-                      [{selectedGroup.ingestion_group}] Ingestion Pipeline \u00b7 {selectedGroup.source_count} configured
+                      [{selectedGroup.ingestion_group}] Ingestion Pipeline {'\u00b7'} {selectedGroup.source_count} configured
                       sources
                     </CardDescription>
                   </CardHeader>
