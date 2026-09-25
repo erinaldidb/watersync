@@ -65,6 +65,7 @@ class IngestionConfig:
     jdbc_user: str = ""
     jdbc_secret_scope: str = ""
     jdbc_secret_key: str = ""
+    uc_secret_name: str = ""
     connection_name: str = ""
     watermark_threshold_minutes: int = 5
     fetch_size: int = 10000
@@ -79,7 +80,18 @@ class IngestionConfig:
         properties = {"fetchsize": str(self.fetch_size)}
         if self.jdbc_user:
             properties["user"] = self.jdbc_user
-        if self.jdbc_secret_scope and self.jdbc_secret_key:
+        if self.uc_secret_name:
+            from databricks.sdk.runtime import dbutils
+
+            parts = self.uc_secret_name.split(".", 2)
+            if len(parts) != 3:
+                raise ValueError(
+                    f"UC secret name '{self.uc_secret_name}' must be in 'catalog.schema.secret_name' format"
+                )
+            properties["password"] = dbutils.secrets.get(
+                catalog=parts[0], schema=parts[1], key=parts[2]
+            )
+        elif self.jdbc_secret_scope and self.jdbc_secret_key:
             from databricks.sdk.runtime import dbutils
 
             properties["password"] = dbutils.secrets.get(

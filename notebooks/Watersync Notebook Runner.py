@@ -81,6 +81,7 @@ dbutils.widgets.text("jdbc_user", "", "JDBC user")
 dbutils.widgets.text("jdbc_password", "", "JDBC password")
 dbutils.widgets.text("jdbc_secret_scope", "", "JDBC secret scope")
 dbutils.widgets.text("jdbc_secret_key", "", "JDBC secret key")
+dbutils.widgets.text("uc_secret_name", "", "UC secret name (catalog.schema.secret_name)")
 dbutils.widgets.text("watermark_threshold_minutes", "5", "Watermark threshold minutes")
 dbutils.widgets.text("fetch_size", "10000", "JDBC fetch size")
 dbutils.widgets.text("num_partitions", "8", "JDBC num partitions")
@@ -193,6 +194,52 @@ else:
 
 # COMMAND ----------
 
+# DBTITLE 1,Test CREATE CONNECTION with current Lakebase endpoint
+# Test CREATE CONNECTION + remote_query with the current Lakebase endpoint
+import uuid
+
+HOST = "ep-calm-waterfall-d8dg2cnk.database.us-east-2.cloud.databricks.com"
+USER = "ema_rina"
+DB = "databricks_postgres"
+db_pass = dbutils.secrets.get(catalog="serverless_pixels_catalog", schema="watersync", key="db_pass")
+db_pass_escaped = db_pass.replace("'", "''")
+conn_name = f"_watersync_diag_{uuid.uuid4().hex[:12]}"
+
+print(f"Host: {HOST}")
+print(f"User: {USER}")
+print(f"Password length: {len(db_pass)}")
+print(f"Connection: {conn_name}")
+
+try:
+    # Step 1: CREATE CONNECTION (mirrors discovery.ts)
+    spark.sql(f"""
+        CREATE CONNECTION `{conn_name}` TYPE POSTGRESQL OPTIONS (
+            host '{HOST}',
+            port '5432',
+            user '{USER}',
+            password '{db_pass_escaped}',
+            trustServerCertificate true
+        )
+    """)
+    print("\nCREATE CONNECTION: OK")
+
+    # Step 2: remote_query (mirrors discovery.ts)
+    result = spark.sql(f"""
+        SELECT * FROM remote_query('{conn_name}', database => '{DB}', query => 'SELECT 1 AS ping')
+    """)
+    display(result)
+    print("remote_query: OK")
+except Exception as e:
+    print(f"\nFAILED: {str(e)[:500]}")
+finally:
+    try:
+        spark.sql(f"DROP CONNECTION IF EXISTS `{conn_name}`")
+        print("Cleanup: OK")
+    except Exception as e2:
+        print(f"Cleanup failed: {e2}")
+
+# COMMAND ----------
+
 # DBTITLE 1,Upsert ingestion config rows
 # ── Upsert ingestion config rows ─────────────────────────────────────────────
 # Edit table_configs below and run this cell to add or update rows.
@@ -203,7 +250,7 @@ table_configs = [
         ingestion_group   = "epic",
         source_table_name = "epic.patients",
         staging_table_fqn = None,           # None -> auto: catalog.schema.staging_<source_table>
-        target_table_fqn  = "serverless_pixels_release_catalog.jdbc_silver.patients",
+        target_table_fqn  = "serverless_pixels_catalog.watersync.patients",
         ingestion_type    = "incremental",  # "incremental" | "full"
         key_columns       = "patient_id",
         watermark_column  = "updated_at",
@@ -224,7 +271,7 @@ table_configs = [
         ingestion_group   = "epic",
         source_table_name = "epic.encounters",
         staging_table_fqn = None,           # None -> auto: catalog.schema.staging_<source_table>
-        target_table_fqn  = "serverless_pixels_release_catalog.jdbc_silver.encounters",
+        target_table_fqn  = "serverless_pixels_catalog.watersync.encounters",
         ingestion_type    = "incremental",  # "incremental" | "full"
         key_columns       = "encounter_id",
         watermark_column  = "modified_at",
@@ -264,6 +311,7 @@ _cfg_schema = StructType([
     StructField("jdbc_user",         StringType(),  True),
     StructField("jdbc_secret_scope", StringType(),  True),
     StructField("jdbc_secret_key",   StringType(),  True),
+    StructField("uc_secret_name",   StringType(),  True),
     StructField("connection_name",   StringType(),  True),
     StructField("watermark_threshold_minutes", IntegerType(), True),
     StructField("fetch_size",        IntegerType(), True),
@@ -287,6 +335,7 @@ _rows = [
         r.get("jdbc_user"),
         r.get("jdbc_secret_scope"),
         r.get("jdbc_secret_key"),
+        r.get("uc_secret_name"),
         r.get("connection_name"),
         r.get("watermark_threshold_minutes"),
         r.get("fetch_size"),

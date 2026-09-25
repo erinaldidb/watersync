@@ -19,6 +19,7 @@ SELECT
   jdbc_user,
   jdbc_secret_scope,
   jdbc_secret_key,
+  uc_secret_name,
   connection_name,
   coalesce(watermark_threshold_minutes, 5) AS watermark_threshold_minutes,
   coalesce(fetch_size, 10000) AS fetch_size,
