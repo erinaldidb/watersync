@@ -1,9 +1,11 @@
+# Databricks notebook source
 """Selective pipeline refresh — runs as a Databricks job task.
 
-Reads `cdc_pipeline_id` from a notebook widget and `full_refresh_target`
-values directly from the upstream foreach task via
-``dbutils.jobs.taskValues.get``.  When the target list is non-empty,
-calls ``pipelines.start_update(full_refresh_selection=...)`` and polls
+Reads `cdc_pipeline_id` from a notebook widget and the
+`full_refresh_targets` list published by the planner
+(``ingestion_configs`` task) via ``dbutils.jobs.taskValues.get``.
+When the target list is non-empty, calls
+``pipelines.start_update(full_refresh_selection=...)`` and polls
 until the update completes.  When the list is empty, exits immediately.
 """
 from __future__ import annotations
@@ -68,22 +70,18 @@ def run_selective_refresh(pipeline_id: str, raw_targets: str) -> list[str]:
 try:
     _pipeline_id = dbutils.widgets.get("cdc_pipeline_id").strip()  # type: ignore[name-defined]
 
-    # Read full_refresh_target values directly from foreach worker iterations.
-    # Using taskValues.get (with a default) avoids the job-level {{...}} resolution
-    # that fails hard when no iteration has set the value yet.
+    # Read the full_refresh_targets list set by the planner (ingestion_configs task).
+    # The planner detects all FULL_REFRESH watermark statuses in one query.
     try:
-        _raw_targets = dbutils.jobs.taskValues.get(  # type: ignore[name-defined]
-            taskKey="ingestion_worker",
-            key="full_refresh_target",
+        _targets_list = dbutils.jobs.taskValues.get(  # type: ignore[name-defined]
+            taskKey="ingestion_configs",
+            key="full_refresh_targets",
             default=[],
             debugValue=[],
         )
-        # foreach aggregation returns a list; non-foreach returns a single value
-        if isinstance(_raw_targets, str):
-            _targets_list = json.loads(_raw_targets)
-        elif isinstance(_raw_targets, list):
-            _targets_list = _raw_targets
-        else:
+        if isinstance(_targets_list, str):
+            _targets_list = json.loads(_targets_list)
+        if not isinstance(_targets_list, list):
             _targets_list = []
     except Exception:
         _targets_list = []

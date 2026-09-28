@@ -41,6 +41,8 @@ class JdbcIngestionConfigRepository:
 
 class IngestionConfigPlanner:
     def __init__(self, spark: Any, runtime: JdbcRuntimeSettings):
+        self.spark = spark
+        self.runtime = runtime
         self.repository = JdbcIngestionConfigRepository(spark=spark, runtime=runtime)
 
     def build_for_each_inputs(self, ingestion_group: str) -> list[dict[str, Any]]:
@@ -48,6 +50,34 @@ class IngestionConfigPlanner:
 
     def build_for_each_inputs_json(self, ingestion_group: str) -> str:
         return json.dumps(self.build_for_each_inputs(ingestion_group=ingestion_group))
+
+    def detect_full_refresh_targets(self, ingestion_group: str) -> list[str]:
+        """Return the ``target_table_fqn`` of every table whose watermark status
+        is ``FULL_REFRESH`` for the given *ingestion_group*.
+
+        This is called once in the planner step so the downstream
+        selective-refresh task knows which pipeline tables need a full
+        refresh without per-worker detection.
+        """
+        query = f"""
+            SELECT DISTINCT c.target_table_fqn
+            FROM {self.runtime.config_table} c
+            JOIN {self.runtime.state_table} w
+              ON c.ingestion_group = w.ingestion_group
+             AND c.source_table_name = w.source_table_name
+            WHERE c.enabled = true
+              AND c.ingestion_group = '{quote_sql_string(ingestion_group)}'
+              AND w.status = 'FULL_REFRESH'
+        """
+        rows = self.spark.sql(query).collect()
+        targets = [str(row["target_table_fqn"]) for row in rows if row["target_table_fqn"]]
+        if targets:
+            logger.info(
+                "[PLAN]   Detected %d table(s) with FULL_REFRESH status: %s",
+                len(targets),
+                targets,
+            )
+        return targets
 
     def publish_task_value(
         self,
