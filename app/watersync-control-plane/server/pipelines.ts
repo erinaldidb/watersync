@@ -5,7 +5,6 @@ import { logger } from './logging.js';
 export const plannerNotebookPath = 'notebooks/Task - Plan Configs';
 export const workerNotebookPath = 'notebooks/Task - Run Ingestion';
 export const selectiveRefreshNotebookPath = 'src/watersync/utils/selective_pipeline_refresh';
-export const pipelineBootstrapPath = 'src/watersync/pipeline_bootstrap';
 
 export const watersyncDependency = (gitUrl: string, gitBranch: string) =>
   `watersync@git+${gitUrl.replace(/\.git$/, '')}.git@${gitBranch}`;
@@ -22,16 +21,11 @@ export async function groupNeedsCdcPipeline(catalog: string, schema: string, ing
   return response.result?.data_array?.[0]?.[0]?.toLowerCase() === 'true';
 }
 
-/**
- * Resolves the workspace-absolute path of the Git repo that contains the
- * watersync project.  Pipeline libraries require `/Workspace/…` paths
- * (they don’t support `source: 'GIT'` like job tasks).
- */
-async function resolveRepoWorkspacePath(gitUrl: string): Promise<string> {
-  const repoName = new URL(gitUrl).pathname.split('/').pop()?.replace(/\.git$/, '') ?? 'watersync';
-  const me = await workspace.currentUser.me();
-  return `/Workspace/Users/${me.userName}/${repoName}`;
-}
+// Minimal entrypoint for the CDC SCD2 pipeline.  The actual logic lives in the
+// watersync package (installed from git via environment.dependencies).  Pipeline
+// libraries need an absolute /Workspace path, so we write this tiny stub to
+// /Shared/ — it just imports and calls the builder.
+const pipelineBootstrap = 'from __future__ import annotations\n\nfrom pyspark import pipelines as dp\nfrom pyspark.sql import SparkSession\n\nfrom watersync.cdc_pipeline import build_pipeline_from_spark_conf\n\nspark = SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()\nbuild_pipeline_from_spark_conf(spark=spark, dp_module=dp)\n';
 
 export async function ensureCdcPipeline(opts: {
   pipelineId?: string | null;
@@ -53,8 +47,10 @@ export async function ensureCdcPipeline(opts: {
     }
   }
 
-  const repoRoot = await resolveRepoWorkspacePath(opts.gitUrl);
-  const bootstrapPath = `${repoRoot}/${pipelineBootstrapPath}.py`;
+  const genDir = '/Shared/watersync-generated-pipelines';
+  const bootstrapPath = `${genDir}/cdc_pipeline_bootstrap.py`;
+  await workspace.workspace.mkdirs({ path: genDir });
+  await workspace.workspace.import({ path: bootstrapPath, format: 'RAW', overwrite: true, content: Buffer.from(pipelineBootstrap).toString('base64') })
 
   const configurationFqn = `${opts.catalog}.${opts.schema}.jdbc_ingestion_config`;
   const watermarkFqn = `${opts.catalog}.${opts.schema}.jdbc_ingestion_watermark`;
@@ -67,7 +63,7 @@ export async function ensureCdcPipeline(opts: {
       'pipeline.watermark_fqn': watermarkFqn,
       'pipeline.ingestion_group': opts.ingestionGroup,
     },
-    libraries: [{ file: { path: bootstrapPath } }],
+    libraries: [{ file: { path: `/Workspace${bootstrapPath}` } }],
     environment: { dependencies: [watersyncDependency(opts.gitUrl, opts.gitBranch)] },
     serverless: true,
     channel: 'CURRENT',
