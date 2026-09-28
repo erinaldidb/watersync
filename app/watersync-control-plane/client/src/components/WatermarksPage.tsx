@@ -37,7 +37,7 @@ export function WatermarksPage() {
   const { location, revision, refresh } = useControl();
   const [search, setSearch] = useState('');
   const [editing, setEditing] = useState<WatermarkRow | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+
   const params = useMemo(
     () => ({
       table_name: sql.string(fqn(location, 'jdbc_ingestion_watermark')),
@@ -50,33 +50,6 @@ export function WatermarksPage() {
   );
   const { data, loading, error } = useAnalyticsQuery('watermark_entries', params);
   useReportedFailure('query.watermark_entries', error, { ...location, search });
-  const reset = async (row: WatermarkRow) => {
-    if (
-      !confirm(
-        `Delete the watermark for ${row.source_table_name}? The next incremental run will perform a full refresh.`
-      )
-    )
-      return;
-    try {
-      await api('/api/watermark', {
-        method: 'DELETE',
-        body: JSON.stringify({
-          ...location,
-          ingestionGroup: row.ingestion_group,
-          sourceTableName: row.source_table_name,
-        }),
-      });
-      refresh();
-    } catch (e) {
-      setMessage(
-        reportError('watermark.delete', e, {
-          ...location,
-          ingestionGroup: row.ingestion_group,
-          sourceTableName: row.source_table_name,
-        })
-      );
-    }
-  };
   return (
     <>
       <PageTitle
@@ -94,7 +67,6 @@ export function WatermarksPage() {
           <RefreshCw className="h-4 w-4" />
         </Button>
       </div>
-      {message && <ErrorState message={message} />}{' '}
       {loading ? (
         <Skeleton className="h-80" />
       ) : error ? (
@@ -139,10 +111,7 @@ export function WatermarksPage() {
                     <Button size="sm" variant="ghost" onClick={() => setEditing(row)}>
                       Update
                     </Button>
-                    <Button size="sm" variant="destructive" onClick={() => void reset(row)}>
-                      Force full refresh
-                    </Button>
-                  </TableCell>
+                    </TableCell>
                 </TableRow>
               ))}
             </TableBody>

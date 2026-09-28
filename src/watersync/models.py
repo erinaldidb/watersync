@@ -35,6 +35,7 @@ class JdbcRuntimeSettings:
     watermark_fqn: str
     ingestion_group: str = ""
     source_table_name: str = ""
+    full_refresh: bool = False
 
     def __post_init__(self) -> None:
         _configure_default_logging()

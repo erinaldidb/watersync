@@ -310,7 +310,8 @@ class JdbcIngestionWorker(ABC):
             "ingestion_group": self.config.ingestion_group,
             "source_table": self.config.source_table_name,
         }
-        write_mode = "overwrite" if self.config.ingestion_type == "full" else "append"
+        is_full = self.config.ingestion_type == "full" or self.runtime.full_refresh
+        write_mode = "overwrite" if is_full else "append"
         logger.info(
             "[WRITE]  %s → %s  mode=%s",
             self.config.source_table_name,
@@ -318,14 +319,14 @@ class JdbcIngestionWorker(ABC):
             write_mode,
             extra=_ctx,
         )
-        df_with_metadata = df if self.config.ingestion_type == "full" else (
+        df_with_metadata = df if (self.config.ingestion_type == "full" and not self.runtime.full_refresh) else (
             df.withColumn("_ingested_at", F.current_timestamp())
             .withColumn("_source_table", F.lit(self.config.source_table_name))
             .withColumn("_ingestion_group", F.lit(self.config.ingestion_group))
             .withColumn("_ingestion_type", F.lit(self.config.ingestion_type))
         )
         writer = df_with_metadata.write.format("delta").option("clusterByAuto", "true")
-        if self.config.ingestion_type == "full":
+        if is_full:
             writer = writer.mode("overwrite").option("overwriteSchema", "true")
         else:
             writer = writer.mode("append").option("mergeSchema", "true")

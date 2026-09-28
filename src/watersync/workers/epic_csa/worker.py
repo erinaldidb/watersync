@@ -174,6 +174,25 @@ class EpicCsaIngestionWorker(JdbcIngestionWorker):
             "ingestion_group": self.config.ingestion_group,
             "source_table": self.config.source_table_name,
         }
+
+        # ── Full-refresh override ────────────────────────────────────
+        # When the user triggers a full refresh (e.g. after losing the
+        # Epic change-tracking window), bypass CSA watermark logic and
+        # pull every row from the source table.  The staging overwrite
+        # in write_to_staging ensures a clean snapshot.
+        if self.runtime.full_refresh:
+            logger.info(
+                "[READ-CSA] %s — full_refresh requested, performing full source read",
+                self.config.source_table_name,
+                extra=_ctx,
+            )
+            source_df = self.read_full_source_jdbc()
+            new_csa_watermark = self.get_csa_max_watermark()
+            return ReadResult(
+                df=source_df,
+                persisted_watermark=str(new_csa_watermark) if new_csa_watermark is not None else "-1",
+            )
+
         last_csa_bigint = int(self.get_last_watermark())
         new_csa_watermark = self.get_csa_max_watermark()
 

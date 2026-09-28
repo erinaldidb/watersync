@@ -80,14 +80,17 @@ export function JobsPage() {
     const timer = window.setTimeout(load, 0);
     return () => window.clearTimeout(timer);
   }, []);
-  const run = async (id: number) => {
+  const run = async (id: number, fullRefresh = false) => {
     setRunningJob(id);
     try {
-      const x = await api<{ runId: number }>(`/api/jobs/${id}/run`, { method: 'POST' });
-      alert(`Run ${x.runId} started`);
+      const x = await api<{ runId: number; fullRefresh?: boolean }>(`/api/jobs/${id}/run`, {
+        method: 'POST',
+        body: JSON.stringify({ fullRefresh }),
+      });
+      alert(`Run ${x.runId} started${fullRefresh ? ' (full refresh mode)' : ''}`);
       load();
     } catch (e) {
-      setError(reportError('jobs.run', e, { jobId: id }));
+      setError(reportError('jobs.run', e, { jobId: id, fullRefresh }));
     } finally {
       setRunningJob(null);
     }
@@ -209,6 +212,18 @@ export function JobsPage() {
                   >
                     <Play className="mr-2 h-4 w-4" />
                     {runningJob === job.job_id ? 'Starting\u2026' : 'Run now'}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={!job.job_id || runningJob === job.job_id}
+                    onClick={() => {
+                      if (job.job_id && confirm('Run a full refresh? Staging will be replaced with a fresh snapshot and CDC will reprocess from scratch.')) {
+                        void run(job.job_id, true);
+                      }
+                    }}
+                  >
+                    <RefreshCw className="mr-2 h-4 w-4" />
+                    Full refresh
                   </Button>
                   <Button variant="outline" asChild>
                     <a href={job.workspace_url} target="_blank" rel="noreferrer">

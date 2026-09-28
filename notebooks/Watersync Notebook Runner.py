@@ -104,6 +104,7 @@ dbutils.widgets.text("product_count", "100", "Lakebase product seed count")
 dbutils.widgets.text("order_count", "500", "Lakebase order seed count")
 dbutils.widgets.dropdown("simulate_updates", "false", ["false", "true"], "Simulate Lakebase updates")
 dbutils.widgets.dropdown("truncate_existing", "false", ["false", "true"], "Truncate existing UC tables")
+dbutils.widgets.dropdown("full_refresh", "false", ["false", "true"], "Force full refresh (overwrite staging, bypass watermark)")
 
 
 # COMMAND ----------
@@ -124,6 +125,7 @@ runtime = JdbcRuntimeSettings(
     watermark_fqn=_widget("watermark_fqn"),
     ingestion_group=_widget("ingestion_group"),
     source_table_name=_widget("source_table_name"),
+    full_refresh=_as_bool("full_refresh"),
 )
 
 if action == "plan_configs":

@@ -111,7 +111,10 @@ export function registerJobRoutes(app: Application) {
               notebook_task: {
                 notebook_path: workerNotebookPath,
                 source: 'GIT',
-                base_parameters: { source_table_name: '{{input.source_table_name}}' },
+                base_parameters: {
+                  source_table_name: '{{input.source_table_name}}',
+                  full_refresh: '{{job.parameters.full_refresh}}',
+                },
               },
             },
           },
@@ -157,6 +160,7 @@ export function registerJobRoutes(app: Application) {
           { name: 'configuration_fqn', default: configurationFqn },
           { name: 'watermark_fqn', default: watermarkFqn },
           { name: 'ingestion_group', default: body.ingestionGroup },
+          { name: 'full_refresh', default: 'false' },
         ],
         tasks,
         git_source: {
@@ -202,9 +206,38 @@ export function registerJobRoutes(app: Application) {
     '/api/jobs/:jobId/run',
     apiRoute('jobs_run', async (req, res) => {
       const jobId = z.coerce.number().int().positive().parse(req.params.jobId);
-      const run = await workspace.jobs.runNow({ job_id: jobId });
-      logger.info('jobs.run_started', { jobId, runId: run.run_id });
-      res.json({ runId: run.run_id });
+      const fullRefresh = req.body?.fullRefresh === true;
+
+      if (fullRefresh) {
+        // runNow cannot combine job_parameters with pipeline_params, so we
+        // temporarily flip the pipeline task's full_refresh flag on the job
+        // definition, trigger the run, then reset it.  The run captures the
+        // setting at creation time so the immediate reset is safe.
+        const job = await workspace.jobs.get({ job_id: jobId });
+        const cdcTask = job.settings?.tasks?.find((t) => t.pipeline_task);
+        if (cdcTask?.pipeline_task) {
+          cdcTask.pipeline_task.full_refresh = true;
+          await workspace.jobs.update({ job_id: jobId, new_settings: job.settings! });
+        }
+
+        const run = await workspace.jobs.runNow({
+          job_id: jobId,
+          job_parameters: { full_refresh: 'true' },
+        });
+
+        // Reset the pipeline task back to incremental
+        if (cdcTask?.pipeline_task) {
+          cdcTask.pipeline_task.full_refresh = false;
+          await workspace.jobs.update({ job_id: jobId, new_settings: job.settings! });
+        }
+
+        logger.info('jobs.run_started', { jobId, runId: run.run_id, fullRefresh });
+        res.json({ runId: run.run_id, fullRefresh });
+      } else {
+        const run = await workspace.jobs.runNow({ job_id: jobId });
+        logger.info('jobs.run_started', { jobId, runId: run.run_id, fullRefresh });
+        res.json({ runId: run.run_id, fullRefresh });
+      }
     })
   );
 
