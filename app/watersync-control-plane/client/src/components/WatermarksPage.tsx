@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useCallback } from 'react';
 import type { FormEvent } from 'react';
 import { sql } from '@databricks/appkit-ui/js';
 import {
@@ -25,7 +25,7 @@ import {
   TableRow,
   useAnalyticsQuery,
 } from '@databricks/appkit-ui/react';
-import { RefreshCw } from 'lucide-react';
+import { RefreshCw, RotateCcw } from 'lucide-react';
 import { api } from '../lib/api';
 import { reportError, useReportedFailure } from '../lib/logging';
 import type { Location, WatermarkRow } from '../types';
@@ -37,6 +37,7 @@ export function WatermarksPage() {
   const { location, revision, refresh } = useControl();
   const [search, setSearch] = useState('');
   const [editing, setEditing] = useState<WatermarkRow | null>(null);
+  const [refreshing, setRefreshing] = useState<WatermarkRow | null>(null);
 
   const params = useMemo(
     () => ({
@@ -107,11 +108,21 @@ export function WatermarksPage() {
                   <TableCell className="max-w-64 truncate" title={row.last_error ?? ''}>
                     {row.last_error ?? '\u2014'}
                   </TableCell>
-                  <TableCell className="text-right">
+                  <TableCell className="text-right space-x-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="text-orange-600 hover:text-orange-700 hover:bg-orange-50"
+                      onClick={() => setRefreshing(row)}
+                      title="Schedule a full refresh for this table"
+                    >
+                      <RotateCcw className="mr-1 h-3.5 w-3.5" />
+                      Full Refresh
+                    </Button>
                     <Button size="sm" variant="ghost" onClick={() => setEditing(row)}>
                       Update
                     </Button>
-                    </TableCell>
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -127,7 +138,84 @@ export function WatermarksPage() {
           refresh();
         }}
       />
+      <FullRefreshDialog
+        row={refreshing}
+        location={location}
+        onClose={() => setRefreshing(null)}
+        onConfirmed={() => {
+          setRefreshing(null);
+          refresh();
+        }}
+      />
     </>
+  );
+}
+
+function FullRefreshDialog({
+  row,
+  location,
+  onClose,
+  onConfirmed,
+}: {
+  row: WatermarkRow | null;
+  location: Location;
+  onClose: () => void;
+  onConfirmed: () => void;
+}) {
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const confirm = useCallback(async () => {
+    if (!row) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api('/api/watermark', {
+        method: 'PATCH',
+        body: JSON.stringify({
+          ...location,
+          ingestionGroup: row.ingestion_group,
+          sourceTableName: row.source_table_name,
+          lastWatermark: row.last_watermark,
+          status: 'FULL_REFRESH',
+        }),
+      });
+      onConfirmed();
+    } catch (x) {
+      setError(
+        reportError('watermark.full_refresh', x, {
+          ...location,
+          ingestionGroup: row.ingestion_group,
+          sourceTableName: row.source_table_name,
+        })
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  }, [row, location, onConfirmed]);
+  return (
+    <Dialog open={!!row} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Confirm full refresh</DialogTitle>
+          <DialogDescription>
+            This will set the status of{' '}
+            <span className="font-mono font-semibold">{row?.source_table_name}</span>{' '}
+            (group <span className="font-semibold">{row?.ingestion_group}</span>) to{' '}
+            <Badge variant="secondary">FULL_REFRESH</Badge>. The next pipeline run will clear and
+            fully reload this table.
+          </DialogDescription>
+        </DialogHeader>
+        {error && <ErrorState message={error} />}
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={submitting}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={() => void confirm()} disabled={submitting}>
+            {submitting ? 'Updating…' : 'Confirm full refresh'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

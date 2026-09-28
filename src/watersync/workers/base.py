@@ -35,6 +35,33 @@ class JdbcIngestionWorker(ABC):
         )
 
     @cached_property
+    def effective_full_refresh(self) -> bool:
+        """True when the table should be fully refreshed.
+
+        This is triggered either by the global runtime flag (full_refresh widget)
+        or by a per-table FULL_REFRESH status in the watermark table (set from
+        the control-plane UI).
+        """
+        if self.runtime.full_refresh:
+            return True
+        status = self._get_watermark_status()
+        return status == "FULL_REFRESH"
+
+    def _get_watermark_status(self) -> str | None:
+        """Read the current status from the watermark table for this table."""
+        row = self.spark.sql(
+            f"""
+            SELECT status
+            FROM {self.runtime.state_table}
+            WHERE ingestion_group = '{quote_sql_string(self.config.ingestion_group)}'
+              AND source_table_name = '{quote_sql_string(self.config.source_table_name)}'
+            ORDER BY last_run_timestamp DESC
+            LIMIT 1
+            """
+        ).first()
+        return str(row["status"]) if row and row["status"] is not None else None
+
+    @cached_property
     def sql_dialect(self) -> SqlDialect:
         if self.config.jdbc_url:
             return detect_sql_dialect(self.config.jdbc_url)
@@ -310,7 +337,7 @@ class JdbcIngestionWorker(ABC):
             "ingestion_group": self.config.ingestion_group,
             "source_table": self.config.source_table_name,
         }
-        is_full = self.config.ingestion_type == "full" or self.runtime.full_refresh
+        is_full = self.config.ingestion_type == "full" or self.effective_full_refresh
         write_mode = "overwrite" if is_full else "append"
         logger.info(
             "[WRITE]  %s → %s  mode=%s",
@@ -319,7 +346,7 @@ class JdbcIngestionWorker(ABC):
             write_mode,
             extra=_ctx,
         )
-        df_with_metadata = df if (self.config.ingestion_type == "full" and not self.runtime.full_refresh) else (
+        df_with_metadata = df if (self.config.ingestion_type == "full" and not self.effective_full_refresh) else (
             df.withColumn("_ingested_at", F.current_timestamp())
             .withColumn("_source_table", F.lit(self.config.source_table_name))
             .withColumn("_ingestion_group", F.lit(self.config.ingestion_group))

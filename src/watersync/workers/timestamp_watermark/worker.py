@@ -16,8 +16,10 @@ class TimestampWatermarkIngestionWorker(JdbcIngestionWorker):
             "ingestion_group": self.config.ingestion_group,
             "source_table": self.config.source_table_name,
         }
-        # Full-refresh override: read entire source, bypassing watermark
-        if self.runtime.full_refresh:
+        # Full-refresh override: read entire source, bypassing watermark.
+        # Triggered by the global runtime flag OR a per-table FULL_REFRESH
+        # status in the watermark table (set from the control-plane UI).
+        if self.effective_full_refresh:
             logger.info(
                 "[READ]   %s — full_refresh requested, performing full source read",
                 self.config.source_table_name,

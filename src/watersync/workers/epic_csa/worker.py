@@ -180,7 +180,9 @@ class EpicCsaIngestionWorker(JdbcIngestionWorker):
         # Epic change-tracking window), bypass CSA watermark logic and
         # pull every row from the source table.  The staging overwrite
         # in write_to_staging ensures a clean snapshot.
-        if self.runtime.full_refresh:
+        # Triggered by the global runtime flag OR a per-table
+        # FULL_REFRESH status in the watermark table (set from the UI).
+        if self.effective_full_refresh:
             logger.info(
                 "[READ-CSA] %s — full_refresh requested, performing full source read",
                 self.config.source_table_name,

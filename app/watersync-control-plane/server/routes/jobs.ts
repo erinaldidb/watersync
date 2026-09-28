@@ -8,6 +8,7 @@ import {
   ensureCdcPipeline,
   plannerNotebookPath,
   workerNotebookPath,
+  selectiveRefreshNotebookPath,
   watersyncDependency,
 } from '../pipelines.js';
 import { apiRoute, logger } from '../logging.js';
@@ -122,8 +123,20 @@ export function registerJobRoutes(app: Application) {
       ];
       if (cdcPipelineId) {
         tasks.push({
-          task_key: 'cdc_scd2_pipeline',
+          task_key: 'selective_pipeline_refresh',
           depends_on: [{ task_key: 'ingestion_worker' }],
+          ...taskCompute,
+          notebook_task: {
+            notebook_path: selectiveRefreshNotebookPath,
+            source: 'GIT',
+            base_parameters: {
+              cdc_pipeline_id: cdcPipelineId,
+            },
+          },
+        });
+        tasks.push({
+          task_key: 'cdc_scd2_pipeline',
+          depends_on: [{ task_key: 'selective_pipeline_refresh' }],
           pipeline_task: { pipeline_id: cdcPipelineId, full_refresh: false },
         });
       }

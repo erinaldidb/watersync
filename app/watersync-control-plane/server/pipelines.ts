@@ -4,6 +4,8 @@ import { logger } from './logging.js';
 
 export const plannerNotebookPath = 'notebooks/Task - Plan Configs';
 export const workerNotebookPath = 'notebooks/Task - Run Ingestion';
+export const selectiveRefreshNotebookPath = 'src/watersync/utils/selective_pipeline_refresh';
+export const pipelineBootstrapPath = 'src/watersync/pipeline_bootstrap';
 
 export const watersyncDependency = (gitUrl: string, gitBranch: string) =>
   `watersync@git+${gitUrl.replace(/\.git$/, '')}.git@${gitBranch}`;
@@ -20,16 +22,16 @@ export async function groupNeedsCdcPipeline(catalog: string, schema: string, ing
   return response.result?.data_array?.[0]?.[0]?.toLowerCase() === 'true';
 }
 
-const pipelineBootstrap = `from __future__ import annotations
-
-from pyspark import pipelines as dp
-from pyspark.sql import SparkSession
-
-from watersync.cdc_pipeline import build_pipeline_from_spark_conf
-
-spark = SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
-build_pipeline_from_spark_conf(spark=spark, dp_module=dp)
-`;
+/**
+ * Resolves the workspace-absolute path of the Git repo that contains the
+ * watersync project.  Pipeline libraries require `/Workspace/…` paths
+ * (they don’t support `source: 'GIT'` like job tasks).
+ */
+async function resolveRepoWorkspacePath(gitUrl: string): Promise<string> {
+  const repoName = new URL(gitUrl).pathname.split('/').pop()?.replace(/\.git$/, '') ?? 'watersync';
+  const me = await workspace.currentUser.me();
+  return `/Workspace/Users/${me.userName}/${repoName}`;
+}
 
 export async function ensureCdcPipeline(opts: {
   pipelineId?: string | null;
@@ -51,16 +53,8 @@ export async function ensureCdcPipeline(opts: {
     }
   }
 
-  const safeGroup = opts.ingestionGroup.replace(/[^A-Za-z0-9_-]/g, '_');
-  const bootstrapDir = '/Shared/watersync-generated-pipelines';
-  const bootstrapPath = `${bootstrapDir}/${safeGroup}_cdc_pipeline.py`;
-  await workspace.workspace.mkdirs({ path: bootstrapDir });
-  await workspace.workspace.import({
-    path: bootstrapPath,
-    format: 'RAW',
-    overwrite: true,
-    content: Buffer.from(pipelineBootstrap).toString('base64'),
-  });
+  const repoRoot = await resolveRepoWorkspacePath(opts.gitUrl);
+  const bootstrapPath = `${repoRoot}/${pipelineBootstrapPath}.py`;
 
   const configurationFqn = `${opts.catalog}.${opts.schema}.jdbc_ingestion_config`;
   const watermarkFqn = `${opts.catalog}.${opts.schema}.jdbc_ingestion_watermark`;
@@ -73,7 +67,7 @@ export async function ensureCdcPipeline(opts: {
       'pipeline.watermark_fqn': watermarkFqn,
       'pipeline.ingestion_group': opts.ingestionGroup,
     },
-    libraries: [{ file: { path: `/Workspace${bootstrapPath}` } }],
+    libraries: [{ file: { path: bootstrapPath } }],
     environment: { dependencies: [watersyncDependency(opts.gitUrl, opts.gitBranch)] },
     serverless: true,
     channel: 'CURRENT',
