@@ -41,6 +41,37 @@ configs = spark.sql(f"""
 """).collect()
 ```
 
+### Step 1b — Resolve JDBC credentials
+
+The watersync config table supports three credential sources. Check which fields are populated and resolve in priority order:
+
+| Config fields | Method | Resolution |
+|--------------|--------|------------|
+| `uc_secret_name` is set | **Unity Catalog secret** | `dbutils.secrets.get(catalog=..., schema=..., key=...)` |
+| `jdbc_secret_scope` + `jdbc_secret_key` are set | **Databricks secret scope** | `dbutils.secrets.get(scope=..., key=...)` |
+| `connection_name` is set (no direct JDBC) | **UC Connection** | No password needed — Spark handles auth via the connection |
+
+**Unity Catalog secrets** (most common for Lakebase): The `uc_secret_name` field uses the format `catalog.schema.secret_name`. Split on `.` and pass as **keyword arguments**:
+
+```python
+# uc_secret_name = "serverless_pixels_catalog.watersync.db_pass"
+parts = uc_secret_name.split(".", 2)
+password = dbutils.secrets.get(catalog=parts[0], schema=parts[1], key=parts[2])
+```
+
+> **Common mistakes:**
+> - `secret('catalog.schema', 'key')` SQL function — this is for Databricks secret scopes, not UC secrets.
+> - `dbutils.secrets.get(scope='catalog.schema', key='key')` — wrong; UC secrets require the `catalog=` keyword arg.
+> - `w.postgres.generate_database_credential(...)` — the SDK `postgres` service may not be available on all workspace versions.
+
+**Databricks secret scopes** (legacy): When `jdbc_secret_scope` and `jdbc_secret_key` are both set:
+
+```python
+password = dbutils.secrets.get(scope=jdbc_secret_scope, key=jdbc_secret_key)
+```
+
+The resolved password is then passed to `spark.read.format("jdbc").option("password", password)` or to a native Python driver connection.
+
 ### Step 2 — Determine the connection method
 
 Each config row uses **one** of two connection methods. Check which fields are populated:
@@ -90,20 +121,9 @@ When `jdbc_url` is set, parse it to detect the database type and install the cor
 | `jdbc:sqlserver://` | SQL Server | `pymssql` | `%pip install pymssql -q` |
 | `jdbc:oracle:thin:@` | Oracle | `oracledb` | `%pip install oracledb -q` |
 
-**Lakebase detection:** If the JDBC URL host matches `*.database.*.cloud.databricks.com`, this is a Lakebase (Databricks Postgres) endpoint. Authenticate using the Databricks SDK:
+**Lakebase detection:** If the JDBC URL host matches `*.database.*.cloud.databricks.com`, this is a Lakebase (Databricks Postgres) endpoint. The endpoint hostname pattern is `ep-<name>-<id>.database.<region>.cloud.databricks.com`. Authenticate using the credential resolved in **Step 1b** (typically a UC secret). Use `spark.read.format("jdbc")` with the JDBC URL, `jdbc_user`, and the resolved password — no native driver installation needed.
 
-```python
-from databricks.sdk import WorkspaceClient
-w = WorkspaceClient()
-cred = w.postgres.generate_database_credential(
-    endpoint="projects/<project>/branches/<branch>/endpoints/primary"
-)
-# Use cred.token as the password, user email as the username
-```
-
-The project and branch must be discovered from the workspace context or prior conversation. The endpoint hostname pattern is `ep-<name>-<id>.database.<region>.cloud.databricks.com`.
-
-**Other databases:** Retrieve the password from the config's `uc_secret_name` (format `catalog.schema.secret_key`) or `jdbc_secret_scope`/`jdbc_secret_key`.
+**All databases:** Resolve the password using **Step 1b** before connecting. The `uc_secret_name` or `jdbc_secret_scope`/`jdbc_secret_key` fields in the config determine which method to use.
 
 **Connection examples by database type:**
 
