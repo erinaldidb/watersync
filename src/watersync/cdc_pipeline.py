@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pyspark.sql.functions import col
+from pyspark.sql.functions import col, expr
 
 from watersync.common import quote_sql_string, resolve_staging_table_fqn, row_to_dict
 
@@ -69,10 +69,10 @@ class CdcScd2PipelineBuilder:
     def register_incremental_csa_flow(self, history_table: str, flow_prefix: str, staging_table: str, staging_fqn: str, key_columns: list[str]) -> None:
         @self.dp.view(
             name=f"v_{staging_table}_upserts",
-            comment=f"Upsert events (_IS_DELETED=0 or NULL full-load rows) from {staging_fqn}",
+            comment=f"Upsert events from {staging_fqn}",
         )
         def _make_upsert_view(_tbl=staging_fqn):
-            return self.spark.readStream.table(_tbl).filter("_IS_DELETED IS NOT TRUE")
+            return self.spark.readStream.table(_tbl)
 
         self.dp.create_auto_cdc_flow(
             name=f"{flow_prefix}_upserts",
@@ -80,31 +80,10 @@ class CdcScd2PipelineBuilder:
             source=f"v_{staging_table}_upserts",
             keys=key_columns,
             sequence_by=col("_csa_update_dt"),
+            apply_as_deletes = expr("_IS_DELETED IS TRUE"),
             stored_as_scd_type="2",
             except_column_list=_METADATA_COLUMNS + _CSA_CONTROL_COLUMNS,
         )
-
-        history_fqn = history_table
-        sink_name = f"{flow_prefix}_delete_sink"
-
-        @self.dp.foreach_batch_sink(name=sink_name)
-        def _delete_sink(batch_df, batch_id, _hist=history_fqn, _keys=list(key_columns)):
-            if batch_df.isEmpty():
-                return
-            tmp_view = f"_csa_del_{_hist.split('.')[-1]}"
-            batch_df.createOrReplaceTempView(tmp_view)
-            key_cond = " AND ".join(f"h.`{key}` = d.`{key}`" for key in _keys)
-            history_quoted = ".".join(f"`{part}`" for part in _hist.split("."))
-            batch_df.sparkSession.sql(f"""
-                MERGE INTO {history_quoted} AS h
-                USING {tmp_view} AS d
-                ON {key_cond} AND h.__END_AT IS NULL
-                WHEN MATCHED THEN UPDATE SET h.__END_AT = d._csa_update_dt
-            """)
-
-        @self.dp.update_flow(target=sink_name, name=f"{flow_prefix}_close_deletes")
-        def _close_deletes_flow(_tbl=staging_fqn, _keys=list(key_columns)):
-            return self.spark.readStream.table(_tbl).filter("_IS_DELETED IS TRUE").select(*_keys, "_csa_update_dt")
 
     def register_snapshot_flow(self, history_table: str, staging_fqn: str, key_columns: list[str]) -> None:
         self.dp.create_auto_cdc_from_snapshot_flow(
