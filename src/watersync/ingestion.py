@@ -50,7 +50,7 @@ class JdbcIngestionConfigRepository:
                 predicate_column,
                 epic_csa_enabled,
                 auto_cdc_from_snapshot,
-                jdbc_url, jdbc_user, jdbc_secret_scope, jdbc_secret_key,
+                jdbc_url, jdbc_user, jdbc_secret_scope, jdbc_secret_key, uc_secret_name,
                 connection_name, watermark_threshold_minutes, fetch_size, num_partitions
             FROM {self.runtime.config_table}
             WHERE {' AND '.join(filters)}
@@ -82,6 +82,7 @@ class JdbcIngestionConfigRepository:
                 jdbc_user=normalize_text(row_dict.get("jdbc_user")),
                 jdbc_secret_scope=normalize_text(row_dict.get("jdbc_secret_scope")),
                 jdbc_secret_key=normalize_text(row_dict.get("jdbc_secret_key")),
+                uc_secret_name=normalize_text(row_dict.get("uc_secret_name")),
                 connection_name=normalize_text(row_dict.get("connection_name")),
                 watermark_threshold_minutes=int(row_dict.get("watermark_threshold_minutes") or 5),
                 fetch_size=int(row_dict.get("fetch_size") or 10000),
@@ -95,9 +96,15 @@ class JdbcIngestionConfigRepository:
                 raise ValueError(
                     f"Config row for {config.source_table_name} requires jdbc_url or connection_name"
                 )
+            has_scope_secret = bool(config.jdbc_secret_scope) and bool(config.jdbc_secret_key)
+            has_uc_secret = bool(config.uc_secret_name)
             if bool(config.jdbc_secret_scope) != bool(config.jdbc_secret_key):
                 raise ValueError(
                     f"Config row for {config.source_table_name} must set both jdbc_secret_scope and jdbc_secret_key"
+                )
+            if not has_scope_secret and not has_uc_secret and not config.connection_name and config.jdbc_url:
+                raise ValueError(
+                    f"Config row for {config.source_table_name} requires a secret (jdbc_secret_scope/key or uc_secret_name) for JDBC authentication"
                 )
             if (
                 config.ingestion_type == "incremental"

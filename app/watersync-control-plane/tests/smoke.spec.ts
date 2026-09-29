@@ -37,6 +37,17 @@ test('configuration screen exposes guided JDBC table discovery', async ({ page }
   await expect(page.getByLabel('Password secret scope')).toBeVisible();
 });
 
+test('configuration discovery supports UC secret connection mode', async ({ page }) => {
+  await page.goto('/config');
+  await page.getByRole('button', { name: 'Discover tables' }).click();
+  await page.getByLabel('Connection method').click();
+  await page.getByRole('option', { name: 'UC Secret (JDBC)' }).click();
+  await expect(page.getByLabel('UC secret name')).toBeVisible();
+  await expect(page.getByLabel('UC secret key')).toBeVisible();
+  await expect(page.getByLabel('JDBC URL')).toBeVisible();
+  await expect(page.getByLabel('Database')).toBeVisible();
+});
+
 test('jobs screen exposes the guided creation form', async ({ page }) => {
   await page.goto('/jobs');
   await page.getByRole('button', { name: 'Create job' }).click();

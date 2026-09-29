@@ -3,13 +3,21 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
+from functools import cached_property
 from typing import Any
 
+from databricks.sdk import WorkspaceClient
 from delta.tables import DeltaTable
 from pyspark.sql import functions as F
 
 from watersync.common import quote_sql_string
 from watersync.models import IngestionConfig, JdbcRuntimeSettings, ReadResult
+from watersync.sql_dialect import (
+    SqlDialect,
+    detect_sql_dialect,
+    dialect_from_connection_type,
+    watermark_window_predicate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +33,52 @@ class JdbcIngestionWorker(ABC):
             if config.ingestion_type == "full" and not config.auto_cdc_from_snapshot
             else self.staging_table_fqn
         )
+
+    @cached_property
+    def effective_full_refresh(self) -> bool:
+        """True when the table should be fully refreshed.
+
+        This is triggered either by the global runtime flag (full_refresh widget)
+        or by a per-table FULL_REFRESH status in the watermark table (set from
+        the control-plane UI).
+        """
+        if self.runtime.full_refresh:
+            return True
+        status = self._get_watermark_status()
+        return status == "FULL_REFRESH"
+
+    def _get_watermark_status(self) -> str | None:
+        """Read the current status from the watermark table for this table."""
+        row = self.spark.sql(
+            f"""
+            SELECT status
+            FROM {self.runtime.state_table}
+            WHERE ingestion_group = '{quote_sql_string(self.config.ingestion_group)}'
+              AND source_table_name = '{quote_sql_string(self.config.source_table_name)}'
+            ORDER BY last_run_timestamp DESC
+            LIMIT 1
+            """
+        ).first()
+        return str(row["status"]) if row and row["status"] is not None else None
+
+    @cached_property
+    def sql_dialect(self) -> SqlDialect:
+        if self.config.jdbc_url:
+            return detect_sql_dialect(self.config.jdbc_url)
+
+        connection = WorkspaceClient().connections.get(
+            name=self.config.connection_name
+        )
+        dialect = dialect_from_connection_type(connection.connection_type)
+        if dialect == "unknown":
+            connection_type = getattr(
+                connection.connection_type, "value", connection.connection_type
+            )
+            raise ValueError(
+                f"Unsupported SQL dialect for Unity Catalog connection "
+                f"'{self.config.connection_name}': {connection_type}"
+            )
+        return dialect
 
     def process(self) -> dict[str, Any]:
         _ctx = {
@@ -172,21 +226,19 @@ class JdbcIngestionWorker(ABC):
             return None, None
 
         if self.config.ingestion_type == "incremental" and last_watermark:
-            predicates = [
-                f"{self.config.watermark_column} > CAST('{quote_sql_string(last_watermark)}' AS TIMESTAMP)"
-            ]
-            if cutoff:
-                predicates.append(
-                    f"{self.config.watermark_column} <= CAST('{quote_sql_string(cutoff)}' AS TIMESTAMP)"
-                )
-            where_clause = "WHERE " + " AND ".join(predicates)
+            where_clause = "WHERE " + watermark_window_predicate(
+                self.config.watermark_column,
+                last_watermark,
+                cutoff,
+                self.sql_dialect,
+            )
         else:
             where_clause = ""
 
         bounds_query = (
             f"(SELECT MIN({self.config.partition_column}) AS min_val, "
             f"MAX({self.config.partition_column}) AS max_val "
-            f"FROM {self.config.source_table_name} {where_clause}) AS bounds"
+            f"FROM {self.config.source_table_name} {where_clause}) bounds"
         )
         row = self.build_jdbc_reader(bounds_query).load().first()
         if row is None or row["min_val"] is None or row["max_val"] is None:
@@ -202,14 +254,12 @@ class JdbcIngestionWorker(ABC):
             return []
 
         if self.config.ingestion_type == "incremental" and last_watermark:
-            wm_filter = [
-                f"{self.config.watermark_column} > CAST('{quote_sql_string(last_watermark)}' AS TIMESTAMP)"
-            ]
-            if cutoff:
-                wm_filter.append(
-                    f"{self.config.watermark_column} <= CAST('{quote_sql_string(cutoff)}' AS TIMESTAMP)"
-                )
-            where_clause = "WHERE " + " AND ".join(wm_filter)
+            where_clause = "WHERE " + watermark_window_predicate(
+                self.config.watermark_column,
+                last_watermark,
+                cutoff,
+                self.sql_dialect,
+            )
         else:
             where_clause = ""
 
@@ -218,7 +268,7 @@ class JdbcIngestionWorker(ABC):
             f"SELECT {self.config.predicate_column}, "
             f"NTILE({self.config.num_partitions}) OVER (ORDER BY {self.config.predicate_column}) AS bucket "
             f"FROM {self.config.source_table_name} {where_clause}"
-            f") sub WHERE bucket > 1 GROUP BY bucket) AS bounds"
+            f") sub WHERE bucket > 1 GROUP BY bucket) bounds"
         )
         return sorted(
             row["boundary_val"]
@@ -256,12 +306,12 @@ class JdbcIngestionWorker(ABC):
             ).strftime("%Y-%m-%d %H:%M:%S")
             source_query = (
                 f"(SELECT * FROM {self.config.source_table_name} "
-                f"WHERE {self.config.watermark_column} > CAST('{quote_sql_string(last_watermark)}' AS TIMESTAMP) "
-                f"AND {self.config.watermark_column} <= CAST('{quote_sql_string(cutoff)}' AS TIMESTAMP)) AS source_data"
+                f"WHERE {watermark_window_predicate(self.config.watermark_column, last_watermark or '1900-01-01 00:00:00', cutoff, self.sql_dialect)}"
+                f") source_data"
             )
         else:
             cutoff = None
-            source_query = f"(SELECT * FROM {self.config.source_table_name}) AS source_data"
+            source_query = f"(SELECT * FROM {self.config.source_table_name}) source_data"
 
         if self.config.predicate_column:
             boundaries = self.build_predicate_boundaries(last_watermark, cutoff)
@@ -287,7 +337,8 @@ class JdbcIngestionWorker(ABC):
             "ingestion_group": self.config.ingestion_group,
             "source_table": self.config.source_table_name,
         }
-        write_mode = "overwrite" if self.config.ingestion_type == "full" else "append"
+        is_full = self.config.ingestion_type == "full" or self.effective_full_refresh
+        write_mode = "overwrite" if is_full else "append"
         logger.info(
             "[WRITE]  %s → %s  mode=%s",
             self.config.source_table_name,
@@ -295,14 +346,14 @@ class JdbcIngestionWorker(ABC):
             write_mode,
             extra=_ctx,
         )
-        df_with_metadata = df if self.config.ingestion_type == "full" else (
+        df_with_metadata = df if (self.config.ingestion_type == "full" and not self.effective_full_refresh) else (
             df.withColumn("_ingested_at", F.current_timestamp())
             .withColumn("_source_table", F.lit(self.config.source_table_name))
             .withColumn("_ingestion_group", F.lit(self.config.ingestion_group))
             .withColumn("_ingestion_type", F.lit(self.config.ingestion_type))
         )
         writer = df_with_metadata.write.format("delta").option("clusterByAuto", "true")
-        if self.config.ingestion_type == "full":
+        if is_full:
             writer = writer.mode("overwrite").option("overwriteSchema", "true")
         else:
             writer = writer.mode("append").option("mergeSchema", "true")

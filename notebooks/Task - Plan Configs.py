@@ -15,10 +15,15 @@ runtime = JdbcRuntimeSettings(
 planner = IngestionConfigPlanner(spark=spark, runtime=runtime)
 payload = planner.build_for_each_inputs_json(runtime.ingestion_group)
 
-# Publish task value for downstream ForEach task
+# Detect tables whose watermark status is FULL_REFRESH (set from the control-plane UI)
+full_refresh_targets = planner.detect_full_refresh_targets(runtime.ingestion_group)
+
+# Publish task values for downstream tasks
 dbutils.jobs.taskValues.set(key="table_configs", value=payload)
+dbutils.jobs.taskValues.set(key="full_refresh_targets", value=full_refresh_targets)
 print(payload)
+if full_refresh_targets:
+    print(f"\nFull refresh targets: {full_refresh_targets}")
 
 # COMMAND ----------
-
 

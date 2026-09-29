@@ -116,6 +116,7 @@ class IngestionJobProvisioner:
                 notebook_path=settings.worker_notebook_path,
                 base_parameters={
                     "source_table_name": "{{input.source_table_name}}",
+                    "full_refresh": "{{job.parameters.full_refresh}}",
                 },
                 source=source,
             ),
@@ -146,6 +147,7 @@ class IngestionJobProvisioner:
                 JobParameterDefinition(name="ingestion_group", default=settings.ingestion_group),
                 JobParameterDefinition(name="configuration_fqn", default=settings.configuration_fqn),
                 JobParameterDefinition(name="watermark_fqn", default=settings.watermark_fqn),
+                JobParameterDefinition(name="full_refresh", default="false"),
             ],
             tasks=[planner_task, ingestion_worker, cdc_task],
             max_concurrent_runs=1,

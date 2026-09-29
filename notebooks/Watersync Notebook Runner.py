@@ -81,6 +81,7 @@ dbutils.widgets.text("jdbc_user", "", "JDBC user")
 dbutils.widgets.text("jdbc_password", "", "JDBC password")
 dbutils.widgets.text("jdbc_secret_scope", "", "JDBC secret scope")
 dbutils.widgets.text("jdbc_secret_key", "", "JDBC secret key")
+dbutils.widgets.text("uc_secret_name", "", "UC secret name (catalog.schema.secret_name)")
 dbutils.widgets.text("watermark_threshold_minutes", "5", "Watermark threshold minutes")
 dbutils.widgets.text("fetch_size", "10000", "JDBC fetch size")
 dbutils.widgets.text("num_partitions", "8", "JDBC num partitions")
@@ -103,6 +104,7 @@ dbutils.widgets.text("product_count", "100", "Lakebase product seed count")
 dbutils.widgets.text("order_count", "500", "Lakebase order seed count")
 dbutils.widgets.dropdown("simulate_updates", "false", ["false", "true"], "Simulate Lakebase updates")
 dbutils.widgets.dropdown("truncate_existing", "false", ["false", "true"], "Truncate existing UC tables")
+dbutils.widgets.dropdown("full_refresh", "false", ["false", "true"], "Force full refresh (overwrite staging, bypass watermark)")
 
 
 # COMMAND ----------
@@ -123,6 +125,7 @@ runtime = JdbcRuntimeSettings(
     watermark_fqn=_widget("watermark_fqn"),
     ingestion_group=_widget("ingestion_group"),
     source_table_name=_widget("source_table_name"),
+    full_refresh=_as_bool("full_refresh"),
 )
 
 if action == "plan_configs":
@@ -203,13 +206,14 @@ table_configs = [
         ingestion_group   = "epic",
         source_table_name = "epic.patients",
         staging_table_fqn = None,           # None -> auto: catalog.schema.staging_<source_table>
-        target_table_fqn  = "serverless_pixels_release_catalog.jdbc_silver.patients",
+        target_table_fqn  = "serverless_pixels_catalog.watersync.patients",
         ingestion_type    = "incremental",  # "incremental" | "full"
         key_columns       = "patient_id",
         watermark_column  = "updated_at",
         partition_column  = "patient_id",
         predicate_column  = None,
         epic_csa_enabled  = True,
+        auto_cdc_from_snapshot = False,
         #jdbc_url          = "postgresql://ep-billowing-king-d2gq9yas.database.us-east-1.cloud.databricks.com/databricks_postgres?sslmode=require",
         #jdbc_user         = "users",
         #jdbc_secret_scope = "slalom_jdbc",
@@ -224,13 +228,14 @@ table_configs = [
         ingestion_group   = "epic",
         source_table_name = "epic.encounters",
         staging_table_fqn = None,           # None -> auto: catalog.schema.staging_<source_table>
-        target_table_fqn  = "serverless_pixels_release_catalog.jdbc_silver.encounters",
+        target_table_fqn  = "serverless_pixels_catalog.watersync.encounters",
         ingestion_type    = "incremental",  # "incremental" | "full"
         key_columns       = "encounter_id",
         watermark_column  = "modified_at",
         partition_column  = "encounter_id",
         predicate_column  = None,
         epic_csa_enabled  = True,
+        auto_cdc_from_snapshot = False,
         #jdbc_url          = "postgresql://ep-billowing-king-d2gq9yas.database.us-east-1.cloud.databricks.com/databricks_postgres?sslmode=require",
         #jdbc_user         = "users",
         #jdbc_secret_scope = "slalom_jdbc",
@@ -260,10 +265,12 @@ _cfg_schema = StructType([
     StructField("partition_column",  StringType(),  True),
     StructField("predicate_column",  StringType(),  True),
     StructField("epic_csa_enabled",  BooleanType(), True),
+    StructField("auto_cdc_from_snapshot", BooleanType(), True),
     StructField("jdbc_url",          StringType(),  True),
     StructField("jdbc_user",         StringType(),  True),
     StructField("jdbc_secret_scope", StringType(),  True),
     StructField("jdbc_secret_key",   StringType(),  True),
+    StructField("uc_secret_name",   StringType(),  True),
     StructField("connection_name",   StringType(),  True),
     StructField("watermark_threshold_minutes", IntegerType(), True),
     StructField("fetch_size",        IntegerType(), True),
@@ -283,10 +290,12 @@ _rows = [
         r.get("partition_column"),
         r.get("predicate_column"),
         r.get("epic_csa_enabled", False),
+        r.get("auto_cdc_from_snapshot", False),
         r.get("jdbc_url"),
         r.get("jdbc_user"),
         r.get("jdbc_secret_scope"),
         r.get("jdbc_secret_key"),
+        r.get("uc_secret_name"),
         r.get("connection_name"),
         r.get("watermark_threshold_minutes"),
         r.get("fetch_size"),
