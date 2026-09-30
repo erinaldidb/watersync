@@ -123,6 +123,7 @@ class CdcScd2PipelineBuilder:
                     f"(group: {config['ingestion_group']}, mode: {ingestion_type}). "
                     f"Keys: {key_columns}"
                 ),
+                cluster_by=key_columns
             )
 
             if ingestion_type == "incremental":
