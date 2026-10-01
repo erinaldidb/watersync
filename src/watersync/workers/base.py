@@ -352,9 +352,9 @@ class JdbcIngestionWorker(ABC):
             .withColumn("_ingestion_group", F.lit(self.config.ingestion_group))
             .withColumn("_ingestion_type", F.lit(self.config.ingestion_type))
         )
-        writer = df_with_metadata.write.format("delta").option("clusterByAuto", "true")
+        writer = df_with_metadata.write.format("delta")
         if is_full:
-            writer = writer.mode("overwrite").option("overwriteSchema", "true")
+            writer = writer.mode("overwrite").option("overwriteSchema", "true").option("clusterByAuto", "true")
         else:
             writer = writer.mode("append").option("mergeSchema", "true")
         writer.saveAsTable(self.write_table_fqn)
