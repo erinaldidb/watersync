@@ -46,6 +46,7 @@ class UnityCatalogSetup:
               jdbc_user STRING COMMENT 'JDBC username',
               jdbc_secret_scope STRING COMMENT 'Secret scope containing the JDBC password',
               jdbc_secret_key STRING COMMENT 'Secret key containing the JDBC password',
+              uc_secret_name STRING COMMENT 'Unity Catalog secret (catalog.schema.secret_name) containing the JDBC password',
               connection_name STRING COMMENT 'Unity Catalog connection used instead of jdbc_url',
               watermark_threshold_minutes INT COMMENT 'Delay behind current time for incremental cutoffs',
               fetch_size INT COMMENT 'JDBC fetch size',
@@ -66,6 +67,7 @@ class UnityCatalogSetup:
             "jdbc_user": "STRING COMMENT 'JDBC username'",
             "jdbc_secret_scope": "STRING COMMENT 'Secret scope containing the JDBC password'",
             "jdbc_secret_key": "STRING COMMENT 'Secret key containing the JDBC password'",
+            "uc_secret_name": "STRING COMMENT 'Unity Catalog secret (catalog.schema.secret_name) containing the JDBC password'",
             "connection_name": "STRING COMMENT 'Unity Catalog connection used instead of jdbc_url'",
             "watermark_threshold_minutes": "INT COMMENT 'Delay behind current time for incremental cutoffs'",
             "fetch_size": "INT COMMENT 'JDBC fetch size'",
@@ -89,14 +91,14 @@ class UnityCatalogSetup:
 
     def create_watermark_state_table(self) -> None:
         self.spark.sql(f"""
-            CREATE OR REPLACE TABLE IDENTIFIER('{self.state_table}') (
+            CREATE TABLE IF NOT EXISTS IDENTIFIER('{self.state_table}') (
               ingestion_group STRING COMMENT 'Matches ingestion_group in config',
               source_table_name STRING COMMENT 'Matches source_table_name in config',
               staging_table_fqn STRING COMMENT 'Matches staging_table_fqn in config',
               ingestion_type STRING COMMENT 'Matches ingestion_type in config',
               last_watermark STRING COMMENT 'Stored watermark value',
               last_run_timestamp TIMESTAMP COMMENT 'Timestamp of the last run',
-              status STRING COMMENT 'SUCCESS, SKIPPED, or FAILED',
+              status STRING COMMENT 'SUCCESS, SKIPPED, FAILED, or FULL_REFRESH',
               last_error STRING COMMENT 'Last failure message'
             )
             USING DELTA
